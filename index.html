@@ -940,6 +940,15 @@ html>body{padding:0}</style>
       border-top: 3px solid var(--primary);
     }
     #ebeam-subfield-tracker .pass-panel h3 { margin-bottom: 14px; }
+    #ebeam-subfield-tracker .mode-switch {
+      margin-bottom: 18px;
+      padding: 5px;
+      width: fit-content;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: #ffffff;
+      box-shadow: 0 4px 14px rgba(18, 67, 103, 0.05);
+    }
     #ebeam-subfield-tracker .controls-grid {
       display: grid;
       grid-template-columns: repeat(3, minmax(150px, 1fr));
@@ -1140,16 +1149,21 @@ html>body{padding:0}</style>
     <span class="direction-badge">Stage direction&nbsp; +Y</span>
   </header>
 
-  <section class="card pass-panel" aria-labelledby="est-pass-heading">
+  <div class="viz-row mode-switch" aria-label="Choose simulator">
+    <button id="est-mode-manual" type="button" class="btn btn-primary" aria-pressed="true">Manual parameters</button>
+    <button id="est-mode-pass" type="button" class="btn" aria-pressed="false">Pass file</button>
+  </div>
+
+  <section id="est-pass-panel" class="card pass-panel" aria-labelledby="est-pass-heading" hidden>
     <h3 id="est-pass-heading">Load a pass file</h3>
     <div class="pass-controls">
       <label class="form-label">
-        Pass folder
-        <input id="est-pass-folder" class="form-control" type="file" webkitdirectory directory multiple>
+        Pass file
+        <input id="est-pass-file" class="form-control" type="file" accept=".pass,application/octet-stream">
       </label>
-      <label id="est-pass-choice-label" class="form-label" hidden>
-        Detected pass file
-        <select id="est-pass-choice" class="form-select"></select>
+      <label class="form-label">
+        Metadata sidecar <span class="text-muted">(only if required)</span>
+        <input id="est-pass-meta" class="form-control" type="file" accept=".meta,.pass.meta,application/octet-stream">
       </label>
       <label class="form-label">
         Subfield height (µm)
@@ -1158,7 +1172,7 @@ html>body{padding:0}</style>
     </div>
     <div class="viz-row pass-actions">
       <button id="est-pass-scan" type="button" class="btn btn-primary" disabled>Scan pass file</button>
-      <span id="est-pass-status" class="text-small text-muted" aria-live="polite">Choose the folder containing your .pass file. Matching metadata is selected automatically and nothing is uploaded.</span>
+      <span id="est-pass-status" class="text-small text-muted" aria-live="polite">Choose one .pass file. It is processed locally and is not uploaded.</span>
     </div>
     <progress id="est-pass-progress" class="pass-progress" max="100" value="0" hidden aria-label="Pass file scan progress"></progress>
     <div id="est-pass-result" class="pass-result" hidden>
@@ -1189,6 +1203,7 @@ html>body{padding:0}</style>
     </div>
   </section>
 
+  <div id="est-manual-simulator">
   <div class="viz-controls controls-grid" aria-label="Simulation inputs">
     <p class="section-title">Simulation parameters</p>
     <label class="form-label">
@@ -1278,6 +1293,7 @@ html>body{padding:0}</style>
   </label>
 
   <div id="est-detail" class="text-small text-muted" aria-live="polite"></div>
+  </div>
 
   <script>
     (() => {
@@ -1290,9 +1306,12 @@ html>body{padding:0}</style>
       };
       const playButton = q("est-play");
       const restartButton = q("est-restart");
-      const passFolderInput = q("est-pass-folder");
-      const passChoiceLabel = q("est-pass-choice-label");
-      const passChoiceSelect = q("est-pass-choice");
+      const passFileInput = q("est-pass-file");
+      const passMetaInput = q("est-pass-meta");
+      const passPanel = q("est-pass-panel");
+      const manualSimulator = q("est-manual-simulator");
+      const manualModeButton = q("est-mode-manual");
+      const passModeButton = q("est-mode-pass");
       const passScanButton = q("est-pass-scan");
       const passStatus = q("est-pass-status");
       const passProgress = q("est-pass-progress");
@@ -1311,7 +1330,6 @@ html>body{padding:0}</style>
       let frameRequest = 0;
       let passWorker = null;
       let parsedPass = null;
-      let detectedPassFiles = [];
       let passSimulationPhase = 0;
       let passSimulationPlaying = false;
       let passSimulationFrame = 0;
@@ -1490,7 +1508,10 @@ html>body{padding:0}</style>
         return worker;
       }
       function selectedPassPair() {
-        return detectedPassFiles[Number(passChoiceSelect.value) || 0] || {passFile: null, metaFile: null};
+        return {
+          passFile: passFileInput.files[0] || null,
+          metaFile: passMetaInput.files[0] || null
+        };
       }
       function updatePassFileState() {
         const {passFile, metaFile} = selectedPassPair();
@@ -1498,41 +1519,10 @@ html>body{padding:0}</style>
         passResult.hidden = true;
         parsedPass = null;
         if (!passFile) {
-          passStatus.textContent = "Choose the folder containing your .pass file. Matching metadata is selected automatically and nothing is uploaded.";
+          passStatus.textContent = "Choose one .pass file. It is processed locally and is not uploaded.";
           return;
         }
-        passStatus.textContent = `${passFile.name} · ${fmtBytes(passFile.size)}${metaFile ? ` · metadata automatically matched: ${metaFile.name}` : " · no matching metadata found; inline header will be used"}`;
-      }
-      function loadPassFolder() {
-        const files = Array.from(passFolderInput.files || []);
-        const byPath = new Map(files.map(file => [(file.webkitRelativePath || file.name).toLowerCase(), file]));
-        detectedPassFiles = files
-          .filter(file => file.name.toLowerCase().endsWith(".pass"))
-          .sort((a, b) => (a.webkitRelativePath || a.name).localeCompare(b.webkitRelativePath || b.name))
-          .map(passFile => {
-            const relativePath = passFile.webkitRelativePath || passFile.name;
-            const slash = relativePath.lastIndexOf("/");
-            const directory = slash >= 0 ? relativePath.slice(0, slash + 1) : "";
-            const baseName = passFile.name.slice(0, -5);
-            const candidates = [directory + passFile.name + ".meta", directory + baseName + ".meta"];
-            const metaFile = candidates.map(path => byPath.get(path.toLowerCase())).find(Boolean) || null;
-            return {passFile, metaFile, relativePath};
-          });
-        passChoiceSelect.innerHTML = "";
-        detectedPassFiles.forEach((entry, index) => {
-          const option = document.createElement("option");
-          option.value = String(index);
-          option.textContent = entry.relativePath + (entry.metaFile ? " (metadata matched)" : " (inline header)");
-          passChoiceSelect.appendChild(option);
-        });
-        passChoiceLabel.hidden = detectedPassFiles.length === 0;
-        if (!detectedPassFiles.length) {
-          passScanButton.disabled = true;
-          passResult.hidden = true;
-          passStatus.textContent = "No .pass files were found in that folder.";
-          return;
-        }
-        updatePassFileState();
+        passStatus.textContent = `${passFile.name} · ${fmtBytes(passFile.size)}${metaFile ? ` · metadata: ${metaFile.name}` : " · using inline header"}`;
       }
       function renderSelectedPassBlock() {
         if (!parsedPass) return;
@@ -1909,8 +1899,21 @@ html>body{padding:0}</style>
         phase = 0;
         update(false);
       });
-      passFolderInput.addEventListener("change", loadPassFolder);
-      passChoiceSelect.addEventListener("change", updatePassFileState);
+      function setSimulatorMode(mode) {
+        const passMode = mode === "pass";
+        passPanel.hidden = !passMode;
+        manualSimulator.hidden = passMode;
+        manualModeButton.className = "btn" + (passMode ? "" : " btn-primary");
+        passModeButton.className = "btn" + (passMode ? " btn-primary" : "");
+        manualModeButton.setAttribute("aria-pressed", String(!passMode));
+        passModeButton.setAttribute("aria-pressed", String(passMode));
+        if (passMode) stopMotion();
+        else stopPassSimulation();
+      }
+      manualModeButton.addEventListener("click", () => setSimulatorMode("manual"));
+      passModeButton.addEventListener("click", () => setSimulatorMode("pass"));
+      passFileInput.addEventListener("change", updatePassFileState);
+      passMetaInput.addEventListener("change", updatePassFileState);
       passHeightInput.addEventListener("change", () => {
         if (parsedPass) {
           parsedPass = null;
