@@ -1733,6 +1733,7 @@ html>body{padding:0}</style>
         const waferY = shot => -(shot.y - parsedPass.firstY) / 1000 +
           parsedPass.stageSpeedUmSec * shot.cumulativeDwellNs * 1e-9;
         const mapY = y => top + (15 - y) / 30 * size;
+        const shotRadius = (0.08 / 30 * size) / 2;
         let s = `<title>Whole pass shot-order simulation</title>`;
         s += `<desc>Sampled shots from the complete pass are shown in encoded order while the stage moves at the slowest subfield speed.</desc>`;
         s += `<rect class="safe-band" x="${left}" y="${top}" width="${size}" height="${size}"></rect>`;
@@ -1750,11 +1751,14 @@ html>body{padding:0}</style>
           if (y < -15 || y > 15) continue;
           const x = mapX(shot.x);
           if (x < left || x > left + size) continue;
-          s += `<circle class="shot-dot" cx="${x}" cy="${mapY(y)}" r="${i === visibleCount - 1 ? 2.4 : 1.1}" opacity="${i === visibleCount - 1 ? 1 : 0.42}"></circle>`;
+          s += `<circle class="shot-dot" cx="${x}" cy="${mapY(y)}" r="${shotRadius}" opacity="0.72"></circle>`;
+          if (i === visibleCount - 1) {
+            s += `<circle cx="${x}" cy="${mapY(y)}" r="${Math.max(2, shotRadius + 1.4)}" fill="none" stroke="var(--viz-series-1)" stroke-width="1"></circle>`;
+          }
         }
         s += `<text class="svg-label" x="${left + 7}" y="${mapY(0) - 8}">${(passSimulationPhase * 100).toFixed(0)}% exposed</text>`;
         s += `<text class="svg-label" x="${left + size + 15}" y="${top + 88}" text-anchor="middle">stage +Y</text>`;
-        s += `<text class="svg-muted" x="${left + size / 2}" y="${top + size + 24}" text-anchor="middle">Shot ${(current.index + 1).toLocaleString()} · dwell ${current.dwell} ns</text>`;
+        s += `<text class="svg-muted" x="${left + size / 2}" y="${top + size + 24}" text-anchor="middle">80 nm shot diameter · shot ${(current.index + 1).toLocaleString()} · dwell ${current.dwell} ns</text>`;
         svg.innerHTML = s;
         drawPassPositionPlot();
         const completion = parsedPass.completedShots / parsedPass.actualShots;
