@@ -1185,7 +1185,7 @@ html>body{padding:0}</style>
     <progress id="est-pass-progress" class="pass-progress" max="100" value="0" hidden aria-label="Pass file scan progress"></progress>
     <div id="est-pass-result" class="pass-result" hidden>
       <label class="form-label">
-        Detected geometry block
+        30 µm FOV section
         <select id="est-pass-block" class="form-select"></select>
       </label>
       <div id="est-pass-block-detail" class="text-small text-muted" aria-live="polite"></div>
@@ -1447,6 +1447,7 @@ html>body{padding:0}</style>
             const bandShots = new Map();
             const bandFirstShot = new Map();
             const bandLastShot = new Map();
+            const fovDwell = new Map(), fovShots = new Map(), fovFirstShot = new Map(), fovLastShot = new Map();
             const sampleStride = Math.max(1, Math.ceil(actualShots / 50000));
             const shotSamples = [];
 
@@ -1490,6 +1491,11 @@ html>body{padding:0}</style>
                 bandShots.set(band, (bandShots.get(band) || 0) + 1);
                 if (!bandFirstShot.has(band)) bandFirstShot.set(band, globalIndex);
                 bandLastShot.set(band, globalIndex);
+                const fovSection = Math.floor(Math.abs(y - firstY) / 30000);
+                fovDwell.set(fovSection, (fovDwell.get(fovSection) || 0) + dwell);
+                fovShots.set(fovSection, (fovShots.get(fovSection) || 0) + 1);
+                if (!fovFirstShot.has(fovSection)) fovFirstShot.set(fovSection, globalIndex);
+                fovLastShot.set(fovSection, globalIndex);
                 if (globalIndex % sampleStride === 0 || globalIndex === actualShots - 1) {
                   shotSamples.push({index: globalIndex, x, y, dwell, cumulativeDwellNs});
                 }
@@ -1522,6 +1528,10 @@ html>body{padding:0}</style>
               firstShot: bandFirstShot.get(index), lastShot: bandLastShot.get(index)
             })).sort((a, b) => a.index - b.index);
             const slowest = subfields.reduce((best, item) => !best || item.dwellNs > best.dwellNs ? item : best, null);
+            const fovSections = Array.from(fovDwell, ([index, dwellNs]) => ({
+              index, dwellNs, shotCount: fovShots.get(index) || 0,
+              firstShot: fovFirstShot.get(index), lastShot: fovLastShot.get(index)
+            })).sort((a, b) => a.index - b.index);
             const stageSpeedUmSec = slowest ? subfieldHeightUm / (slowest.dwellNs * 1e-9) : 0;
             let completedShots = 0;
             let replayed = 0;
@@ -1549,7 +1559,7 @@ html>body{padding:0}</style>
                 hasSidecar: Boolean(metaFile), blocks, subfields, slowestSubfield: slowest,
                 stageSpeedUmSec, totalDwellNs: cumulativeDwellNs, firstY,
                 minX: minXAll, maxX: maxXAll, minY: minYAll, maxY: maxYAll,
-                sampleStride, shotSamples, subfieldHeightUm, completedShots
+                sampleStride, shotSamples, subfieldHeightUm, completedShots, fovSections
               }
             });
           } catch (error) {
@@ -1586,15 +1596,10 @@ html>body{padding:0}</style>
       }
       function renderSelectedPassBlock() {
         if (!parsedPass) return;
-        const block = parsedPass.blocks[Number(passBlockSelect.value)];
-        if (!block) return;
-        const xSpan = (block.maxX - block.minX) / 1000;
-        const ySpan = (block.maxY - block.minY) / 1000;
-        const dwellText = block.minDwell === block.maxDwell
-          ? `${block.minDwell} ns dwell`
-          : `${block.minDwell}–${block.maxDwell} ns dwell`;
+        const section = parsedPass.fovSections[Number(passBlockSelect.value)];
+        if (!section) return;
         passBlockDetail.textContent =
-          `${fmt(block.shotCount, 0)} shots · ${block.kind} · X ${fmt(xSpan, 3)} µm × Y ${fmt(ySpan, 3)} µm · ${dwellText} · records ${fmt(block.startShot + 1, 0)}–${fmt(block.startShot + block.shotCount, 0)}`;
+          `${fmt(section.shotCount, 0)} shots · Y ${section.index * 30}–${(section.index + 1) * 30} µm below the pass start · records ${fmt(section.firstShot + 1, 0)}–${fmt(section.lastShot + 1, 0)}`;
       }
       function scanPassFile() {
         const {passFile, metaFile} = selectedPassPair();
@@ -1622,15 +1627,15 @@ html>body{padding:0}</style>
             passProgress.hidden = true;
             passScanButton.disabled = false;
             passStatus.textContent =
-              `Pass format V${parsedPass.version} · ${fmt(parsedPass.actualShots, 0)} shots · ${parsedPass.blocks.length} geometry blocks · ${fmtBytes(parsedPass.fileSize)} · ${parsedPass.hasSidecar ? "sidecar header" : "inline header"}`;
+              `Pass format V${parsedPass.version} · ${fmt(parsedPass.actualShots, 0)} shots · ${parsedPass.fovSections.length} FOV sections · ${fmtBytes(parsedPass.fileSize)} · ${parsedPass.hasSidecar ? "sidecar header" : "inline header"}`;
             passBlockSelect.innerHTML = "";
-            parsedPass.blocks.forEach((block, index) => {
+            parsedPass.fovSections.forEach((section, index) => {
               const option = document.createElement("option");
               option.value = String(index);
-              option.textContent = `#${index + 1} · ${block.kind} · ${fmt(block.shotCount, 0)} shots`;
+              option.textContent = `Section ${index + 1} · ${section.index * 30}–${(section.index + 1) * 30} µm · ${fmt(section.shotCount, 0)} shots`;
               passBlockSelect.appendChild(option);
             });
-            passResult.hidden = parsedPass.blocks.length === 0;
+            passResult.hidden = parsedPass.fovSections.length === 0;
             renderSelectedPassBlock();
             passPlayButton.disabled = false;
             passRestartButton.disabled = false;
@@ -1754,13 +1759,13 @@ html>body{padding:0}</style>
       async function loadExactPassSubfield() {
         if (!parsedPass) return;
         const token = ++exactPassLoadToken;
-        const selectedIndex = Math.min(parsedPass.subfields.length - 1, Math.max(0, n(passStepInput.value) - 1));
-        const section = parsedPass.subfields[selectedIndex];
+        const selectedIndex = Math.min(parsedPass.fovSections.length - 1, Math.max(0, n(passBlockSelect.value)));
+        const section = parsedPass.fovSections[selectedIndex];
         const {passFile} = selectedPassPair();
         if (!passFile || !section) return;
         stopPassSimulation();
         exactPassShots = [];
-        q("est-pass-detail").textContent = `Loading every shot in subfield ${selectedIndex + 1}…`;
+        q("est-pass-detail").textContent = `Loading every shot in 30 µm FOV section ${selectedIndex + 1}…`;
         const recordCount = section.lastShot - section.firstShot + 1;
         const startByte = parsedPass.dataOffset + section.firstShot * 8;
         const buffer = await passFile.slice(startByte, startByte + recordCount * 8).arrayBuffer();
@@ -1770,8 +1775,8 @@ html>body{padding:0}</style>
         for (let i = 0; i < recordCount; i++) {
           const low = view.getUint32(i * 8, true);
           const y = view.getUint32(i * 8 + 4, true);
-          const band = Math.floor(Math.abs(y - parsedPass.firstY) / Math.max(1, parsedPass.subfieldHeightUm * 1000));
-          if (band !== section.index) continue;
+          const fovSection = Math.floor(Math.abs(y - parsedPass.firstY) / 30000);
+          if (fovSection !== section.index) continue;
           const dwell = (low >>> 2) & 0x3FFF;
           localDwellNs += dwell;
           exactPassShots.push({
@@ -1793,8 +1798,8 @@ html>body{padding:0}</style>
         const left = 42, top = 30, size = 286;
         const xCenter = (parsedPass.minX + parsedPass.maxX) / 2;
         const mapX = x => left + ((x - xCenter) / 1000 + 15) / 30 * size;
-        const selectedIndex = Math.min(parsedPass.subfields.length - 1, Math.max(0, n(passStepInput.value) - 1));
-        const priorDwellNs = parsedPass.subfields.slice(0, selectedIndex).reduce((sum, item) => sum + item.dwellNs, 0);
+        const selectedIndex = Math.min(parsedPass.fovSections.length - 1, Math.max(0, n(passBlockSelect.value)));
+        const priorDwellNs = parsedPass.fovSections.slice(0, selectedIndex).reduce((sum, item) => sum + item.dwellNs, 0);
         const currentStageTravel = parsedPass.stageSpeedUmSec * (priorDwellNs + current.localDwellNs) * 1e-9;
         const waferY = shot => -Math.abs(shot.y - parsedPass.firstY) / 1000 + currentStageTravel;
         const mapY = y => top + (15 - y) / 30 * size;
@@ -2165,7 +2170,10 @@ html>body{padding:0}</style>
         }
       });
       passScanButton.addEventListener("click", scanPassFile);
-      passBlockSelect.addEventListener("change", renderSelectedPassBlock);
+      passBlockSelect.addEventListener("change", () => {
+        renderSelectedPassBlock();
+        loadExactPassSubfield();
+      });
       passPlayButton.addEventListener("click", () => {
         if (!parsedPass) return;
         if (passSimulationPlaying) return stopPassSimulation();
@@ -2185,7 +2193,7 @@ html>body{padding:0}</style>
         const value = Math.min(parsedPass.subfields.length, Math.max(1, n(passStepInput.value)));
         passStepInput.value = String(value);
         q("est-pass-step-val").textContent = `${value} of ${parsedPass.subfields.length}`;
-        loadExactPassSubfield();
+        drawPassPositionPlot();
       });
       update(true);
       renderPassSkeleton();
