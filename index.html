@@ -1088,6 +1088,10 @@ html>body{padding:0}</style>
       stroke-width: 2;
     }
     #ebeam-subfield-tracker .shot-dot { fill: var(--viz-series-1); }
+    #ebeam-subfield-tracker .shot-pending {
+      fill: var(--muted-foreground);
+      opacity: 0.28;
+    }
     #ebeam-subfield-tracker .sub-safe { fill: var(--viz-series-1); }
     #ebeam-subfield-tracker .sub-partial { fill: var(--viz-series-3); }
     #ebeam-subfield-tracker .sub-outside { fill: var(--destructive); }
@@ -1799,9 +1803,11 @@ html>body{padding:0}</style>
         const xCenter = (parsedPass.minX + parsedPass.maxX) / 2;
         const mapX = x => left + ((x - xCenter) / 1000 + 15) / 30 * size;
         const selectedIndex = Math.min(parsedPass.fovSections.length - 1, Math.max(0, n(passBlockSelect.value)));
-        const priorDwellNs = parsedPass.fovSections.slice(0, selectedIndex).reduce((sum, item) => sum + item.dwellNs, 0);
-        const currentStageTravel = parsedPass.stageSpeedUmSec * (priorDwellNs + current.localDwellNs) * 1e-9;
-        const waferY = shot => -Math.abs(shot.y - parsedPass.firstY) / 1000 + currentStageTravel;
+        const selectedFovSection = parsedPass.fovSections[selectedIndex];
+        const sectionTopDistanceNm = selectedFovSection.index * 30000;
+        const currentStageTravel = parsedPass.stageSpeedUmSec * current.localDwellNs * 1e-9;
+        const waferY = shot =>
+          -(Math.abs(shot.y - parsedPass.firstY) - sectionTopDistanceNm) / 1000 + currentStageTravel;
         const mapY = y => top + (15 - y) / 30 * size;
         const shotRadius = Math.max(0.9, (0.08 / 30 * size) / 2);
         let s = `<title>Whole pass shot-order simulation</title>`;
@@ -1815,18 +1821,18 @@ html>body{padding:0}</style>
           s += `<text class="svg-muted" x="${left - 8}" y="${yy + 4}" text-anchor="end">${tick}</text>`;
         }
         const visibleShots = [];
-        for (let i = 0; i < visibleCount; i++) {
+        for (let i = 0; i < samples.length; i++) {
           const shot = samples[i];
           const y = waferY(shot);
           if (y < -15 || y > 15) continue;
           const x = mapX(shot.x);
           if (x < left || x > left + size) continue;
-          visibleShots.push({i, x, y});
+          visibleShots.push({i, x, y, exposed: i < visibleCount});
         }
         const displayStride = Math.max(1, Math.ceil(visibleShots.length / 8000));
         for (let j = 0; j < visibleShots.length; j += displayStride) {
           const dot = visibleShots[j];
-          s += `<circle class="shot-dot" cx="${dot.x}" cy="${mapY(dot.y)}" r="${shotRadius}" opacity="1"></circle>`;
+          s += `<circle class="${dot.exposed ? "shot-dot" : "shot-pending"}" cx="${dot.x}" cy="${mapY(dot.y)}" r="${shotRadius}"></circle>`;
         }
         const activeY = waferY(current);
         const activeX = mapX(current.x);
@@ -1837,7 +1843,7 @@ html>body{padding:0}</style>
         s += `<line class="stage-arrow" x1="${left + size + 15}" x2="${left + size + 15}" y1="${mapY(-4)}" y2="${mapY(5)}"></line>`;
         s += `<path class="stage-arrow" d="M ${left + size + 10} ${mapY(4)} L ${left + size + 15} ${mapY(5)} L ${left + size + 20} ${mapY(4)} Z"></path>`;
         s += `<text class="svg-label" x="${left + size + 15}" y="${top + 88}" text-anchor="middle">stage +Y</text>`;
-        s += `<text class="svg-muted" x="${left + size / 2}" y="${top + size + 24}" text-anchor="middle">80 nm shots · overview size enhanced for visibility · shot ${(current.index + 1).toLocaleString()}</text>`;
+        s += `<text class="svg-muted" x="${left + size / 2}" y="${top + size + 24}" text-anchor="middle">Blue exposed · gray pending · shot ${(current.index + 1).toLocaleString()}</text>`;
         svg.innerHTML = s;
         const zoomSvg = q("est-pass-zoom");
         const zoomLeft = 93, zoomTop = 8, zoomSize = 126, zoomCenterX = zoomLeft + zoomSize / 2, zoomCenterY = zoomTop + zoomSize / 2;
@@ -1852,7 +1858,7 @@ html>body{padding:0}</style>
           const dx = (shot.x - current.x) / 1000;
           const dy = waferY(shot) - activeY;
           if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) continue;
-          z += `<circle class="shot-dot" cx="${zoomMapX(dx)}" cy="${zoomMapY(dy)}" r="${zoomShotRadius}" opacity="0.86"></circle>`;
+          z += `<circle class="${dot.exposed ? "shot-dot" : "shot-pending"}" cx="${zoomMapX(dx)}" cy="${zoomMapY(dy)}" r="${zoomShotRadius}"></circle>`;
         }
         z += `<line class="centerline" x1="${zoomCenterX}" x2="${zoomCenterX}" y1="${zoomTop}" y2="${zoomTop + zoomSize}"></line>`;
         z += `<line class="centerline" x1="${zoomLeft}" x2="${zoomLeft + zoomSize}" y1="${zoomCenterY}" y2="${zoomCenterY}"></line>`;
