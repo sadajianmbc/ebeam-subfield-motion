@@ -1055,6 +1055,10 @@ html>body{padding:0}</style>
       <input id="est-ratio" class="form-control" type="number" min="0" max="100" step="0.1" value="1">
     </label>
     <label class="form-label">
+      <span class="control-head"><span>Pattern X width</span><span id="est-xwidth-val">30 µm</span></span>
+      <input id="est-xwidth" class="form-control" type="number" min="0.001" max="30" step="0.001" value="30">
+    </label>
+    <label class="form-label">
       <span class="control-head"><span>Line length</span><span id="est-length-val">30 µm</span></span>
       <input id="est-length" class="form-control" type="number" min="0.1" max="10000" step="0.1" value="30">
     </label>
@@ -1132,7 +1136,7 @@ html>body{padding:0}</style>
       const q = id => root.querySelector("#" + id);
       const controls = {
         bss: q("est-bss"), cd: q("est-cd"), ratio: q("est-ratio"),
-        length: q("est-length"), height: q("est-height"), dwell: q("est-dwell"),
+        xwidth: q("est-xwidth"), length: q("est-length"), height: q("est-height"), dwell: q("est-dwell"),
         step: q("est-step"), pace: q("est-pace")
       };
       const playButton = q("est-play");
@@ -1368,11 +1372,14 @@ html>body{padding:0}</style>
         const bss = n(controls.bss.value);
         const cd = n(controls.cd.value);
         const spaceMult = n(controls.ratio.value);
+        const xWidth = n(controls.xwidth.value);
         const length = n(controls.length.value);
         const height = n(controls.height.value);
         const dwell = n(controls.dwell.value);
         const pitch = cd * (1 + spaceMult);
-        const lineCount = Math.floor((30000 - cd) / pitch) + 1;
+        const lineCount = Math.max(1, Math.floor((xWidth * 1000 - cd) / pitch) + 1);
+        const centerSpanUm = Math.max(0, (lineCount - 1) * pitch / 1000);
+        const patternWidthUm = centerSpanUm + cd / 1000;
         const transverse = Math.max(1, Math.ceil(cd / 100));
         const shotsAlong = Math.floor((height * 1000 - markerNm) / bss) + 1;
         const fullShots = lineCount * transverse * shotsAlong;
@@ -1392,13 +1399,14 @@ html>body{padding:0}</style>
           sections.push({i, actualHeight, shots, timeSec, travel, start, end, state: sectionState(start, end)});
           stageTravel += travel;
         }
-        return {bss, cd, spaceMult, length, height, dwell, pitch, lineCount, transverse, shotsAlong, fullShots, fullTimeSec, speedUmSec, sections};
+        return {bss, cd, spaceMult, xWidth, length, height, dwell, pitch, lineCount, centerSpanUm, patternWidthUm, transverse, shotsAlong, fullShots, fullTimeSec, speedUmSec, sections};
       }
 
       function updateLabels(m) {
         q("est-bss-val").textContent = m.bss + " nm";
         q("est-cd-val").textContent = m.cd + " nm";
         q("est-ratio-val").textContent = "1:" + m.spaceMult;
+        q("est-xwidth-val").textContent = fmt(m.xWidth, 3) + " µm";
         q("est-length-val").textContent = fmt(m.length, 1) + " µm";
         q("est-height-val").textContent = fmt(m.height, 1) + " µm";
         q("est-dwell-val").textContent = m.dwell + " ns";
@@ -1424,7 +1432,9 @@ html>body{padding:0}</style>
           s += `<text class="svg-muted" x="${x0 - 8}" y="${yy + 4}" text-anchor="end">${tick}</text>`;
         }
         for (let i = 0; i < linesToDraw; i++) {
-          const x = -15 + (30 * (i + 0.5) / linesToDraw);
+          const sourceIndex = linesToDraw === 1 ? 0 : i * (m.lineCount - 1) / (linesToDraw - 1);
+          const firstCenter = -m.patternWidthUm / 2 + m.cd / 2000;
+          const x = firstCenter + sourceIndex * m.pitch / 1000;
           const lineProgress = Math.max(0, Math.min(1, progress * linesToDraw - i));
           const exposedTo = lineTop + (lineBottom - lineTop) * lineProgress;
           s += `<line class="line-mark" x1="${xMap(x)}" x2="${xMap(x)}" y1="${yMap(lineTop)}" y2="${yMap(lineBottom)}"></line>`;
@@ -1434,7 +1444,8 @@ html>body{padding:0}</style>
         s += `<line class="stage-arrow" x1="${x0 + size + 15}" x2="${x0 + size + 15}" y1="${yMap(-4)}" y2="${yMap(5)}"></line>`;
         s += `<path class="stage-arrow" d="M ${x0 + size + 10} ${yMap(4)} L ${x0 + size + 15} ${yMap(5)} L ${x0 + size + 20} ${yMap(4)} Z"></path>`;
         s += `<text class="svg-label" x="${x0 + size + 15}" y="${yMap(6.5)}" text-anchor="middle">stage +Y</text>`;
-        s += `<text class="svg-muted" x="${x0 + size / 2}" y="${y0 + size + 26}" text-anchor="middle">30 µm X range · ${m.lineCount} lines</text>`;
+        s += `<text class="svg-muted" x="${x0 + size / 2}" y="${y0 + size + 23}" text-anchor="middle">Generated X width ${fmt(m.patternWidthUm, 3)} µm · ${m.lineCount} lines</text>`;
+        s += `<text class="svg-muted" x="${x0 + size / 2}" y="${y0 + size + 43}" text-anchor="middle">Center span ${fmt(m.centerSpanUm, 3)} µm · ${fmt(m.pitch, 3)} nm pitch</text>`;
         svg.innerHTML = s;
       }
 
@@ -1553,7 +1564,7 @@ html>body{padding:0}</style>
         frameRequest = requestAnimationFrame(animate);
       }
 
-      ["bss", "cd", "ratio", "length", "height", "dwell"].forEach(name => {
+      ["bss", "cd", "ratio", "xwidth", "length", "height", "dwell"].forEach(name => {
         const refresh = () => {
           if (controls[name].value === "" || !controls[name].checkValidity()) return;
           update(true);
