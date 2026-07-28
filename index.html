@@ -1394,6 +1394,7 @@ html>body{padding:0}</style>
       let passBufferStart = 0;
       let passStreamCursor = 0;
       let passNextChunkPromise = null;
+      let passFovSectionByIndex = new Map();
 
       function n(v) { return Number(v); }
       function fmt(v, digits = 3) {
@@ -1549,7 +1550,8 @@ html>body{padding:0}</style>
             const fastest = subfields.reduce((best, item) => !best || item.dwellNs < best.dwellNs ? item : best, null);
             const fovSections = Array.from(fovDwell, ([index, dwellNs]) => ({
               index, dwellNs, shotCount: fovShots.get(index) || 0,
-              firstShot: null, lastShot: null
+              firstShot: null, lastShot: null,
+              displayStride: Math.max(1, Math.ceil((fovShots.get(index) || 0) / 8000))
             })).sort((a, b) => a.index - b.index);
             const minimumStageSpeedUmSec = slowest ? subfieldHeightUm / (slowest.dwellNs * 1e-9) : 0;
             const maximumStageSpeedUmSec = fastest ? subfieldHeightUm / (fastest.dwellNs * 1e-9) : 0;
@@ -1674,6 +1676,7 @@ html>body{padding:0}</style>
         passScanButton.disabled = !passFile;
         passResult.hidden = true;
         parsedPass = null;
+        passFovSectionByIndex = new Map();
         exactPassShots = [];
         stopPassSimulation();
         renderPassSkeleton(passFile ? "Ready to scan selected pass file" : undefined);
@@ -1712,6 +1715,9 @@ html>body{padding:0}</style>
             passStatus.textContent = `Scanning locally… ${percent.toFixed(1)}% · organizing shots by subfield height`;
           } else if (message.type === "complete") {
             parsedPass = message.result;
+            passFovSectionByIndex = new Map(
+              parsedPass.fovSections.map(section => [section.index, section])
+            );
             passProgress.value = 100;
             passProgress.hidden = true;
             passScanButton.disabled = false;
@@ -1948,20 +1954,22 @@ html>body{padding:0}</style>
         const visibleShots = [];
         for (let i = 0; i < samples.length; i++) {
           const shot = samples[i];
+          const section = passFovSectionByIndex.get(shot.fovSection);
+          const stableStride = section ? section.displayStride : 1;
+          if (shot.index % stableStride !== 0) continue;
           const y = waferY(shot);
           if (y < -15 || y > 15) continue;
           const x = mapX(shot.x);
           if (x < left || x > left + size) continue;
           visibleShots.push({i, x, y, exposed: i < visibleCount});
         }
-        const displayStride = Math.max(1, Math.ceil(visibleShots.length / 8000));
-        for (let j = 0; j < visibleShots.length; j += displayStride) {
-          const dot = visibleShots[j];
+        for (const dot of visibleShots) {
           s += `<circle class="${dot.exposed ? "shot-dot" : "shot-pending"}" cx="${dot.x}" cy="${mapY(dot.y)}" r="${shotRadius}"></circle>`;
         }
         const activeY = waferY(active);
         const activeX = mapX(active.x);
         if (activeY >= -15 && activeY <= 15 && activeX >= left && activeX <= left + size) {
+          s += `<circle class="${waitingForNext ? "shot-pending" : "shot-dot"}" cx="${activeX}" cy="${mapY(activeY)}" r="${shotRadius}"></circle>`;
           s += `<circle cx="${activeX}" cy="${mapY(activeY)}" r="${Math.max(2, shotRadius + 1.4)}" fill="none" stroke="var(--viz-series-1)" stroke-width="1"></circle>`;
         }
         s += `<text class="svg-label" x="${left + 7}" y="${mapY(0) - 8}">${
@@ -1991,6 +1999,7 @@ html>body{padding:0}</style>
         }
         z += `<line class="centerline" x1="${zoomCenterX}" x2="${zoomCenterX}" y1="${zoomTop}" y2="${zoomTop + zoomSize}"></line>`;
         z += `<line class="centerline" x1="${zoomLeft}" x2="${zoomLeft + zoomSize}" y1="${zoomCenterY}" y2="${zoomCenterY}"></line>`;
+        z += `<circle class="${waitingForNext ? "shot-pending" : "shot-dot"}" cx="${zoomCenterX}" cy="${zoomCenterY}" r="${zoomShotRadius}"></circle>`;
         z += `<circle cx="${zoomCenterX}" cy="${zoomCenterY}" r="${zoomShotRadius + 3}" fill="none" stroke="var(--viz-series-1)" stroke-width="1.5"></circle>`;
         z += `<text class="svg-muted" x="${zoomCenterX}" y="148" text-anchor="middle">1 × 1 µm · 80 nm dots · active shot centered</text>`;
         zoomSvg.innerHTML = z;
