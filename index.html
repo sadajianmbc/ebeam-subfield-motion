@@ -2058,10 +2058,10 @@ html>body{padding:0}</style>
         }
         passSimulationFrame = requestAnimationFrame(animatePassSimulation);
       }
-      function sectionState(start, end) {
-        if (start > fovHalf) return "outside";
-        if (end > fovHalf) return "partial";
-        return "safe";
+      function sectionState(actualHeight, travel, lineCount) {
+        const localMinimumY = travel / lineCount - actualHeight;
+        const localMaximumY = travel * (lineCount - 1) / lineCount;
+        return localMinimumY >= -fovHalf && localMaximumY <= fovHalf ? "safe" : "partial";
       }
       function model() {
         const bss = n(controls.bss.value);
@@ -2093,7 +2093,8 @@ html>body{padding:0}</style>
           const end = stageTravel + travel;
           sections.push({
             i, actualHeight, actualShotsAlong: Math.max(1, actualShotsAlong),
-            shots, timeSec, travel, start, end, state: sectionState(start, end)
+            shots, timeSec, travel, start, end,
+            state: sectionState(actualHeight, travel, lineCount)
           });
           stageTravel += travel;
         }
@@ -2117,16 +2118,17 @@ html>body{padding:0}</style>
         const xMap = x => x0 + (x + fovHalf) / (2 * fovHalf) * size;
         const linesToDraw = Math.min(m.lineCount, 72);
         const maxVisibleDots = 6000;
+        const totalShotsAlong = m.sections.reduce((sum, section) => sum + section.actualShotsAlong, 0);
         const dotsAlong = Math.max(1, Math.min(
-          selected.actualShotsAlong,
+          totalShotsAlong,
           Math.floor(maxVisibleDots / linesToDraw)
         ));
         const shotRadius = Math.max(0.68, Math.min(1.15, size / Math.max(250, dotsAlong * 5)));
         const stageShift = selected.start + selected.travel * progress;
         const lineTop = stageShift;
-        const lineBottom = lineTop - selected.actualHeight;
+        const selectedDesignStart = selected.i * m.height;
         let s = `<title>Subfield ${selected.i + 1} in the moving field of view</title>`;
-        s += `<desc>The field spans plus or minus 15 micrometers. Gray dots are pending shots. Each dot turns blue when the beam reaches it, exposing from top to bottom along each line and then from left to right while the complete design moves upward with positive Y stage travel.</desc>`;
+        s += `<desc>The field spans plus or minus 15 micrometers. Each complete vertical line has the entered line length. The beam exposes one subfield-height segment at a time, from top to bottom on each line and from the left line to the right line, before advancing to the next segment down the design.</desc>`;
         s += `<defs><clipPath id="est-manual-fov-clip"><rect x="${x0}" y="${y0}" width="${size}" height="${size}"></rect></clipPath></defs>`;
         s += `<rect class="safe-band" x="${x0}" y="${y0}" width="${size}" height="${size}"></rect>`;
         s += `<rect class="fov-edge" x="${x0}" y="${y0}" width="${size}" height="${size}"></rect>`;
@@ -2142,11 +2144,23 @@ html>body{padding:0}</style>
           const firstCenter = -m.patternWidthUm / 2 + m.cd / 2000;
           const x = firstCenter + sourceIndex * m.pitch / 1000;
           for (let shotIndex = 0; shotIndex < dotsAlong; shotIndex++) {
-            const alongFraction = dotsAlong === 1 ? 1 : shotIndex / (dotsAlong - 1);
-            const shotY = lineTop + (lineBottom - lineTop) * alongFraction;
+            const designDepth = dotsAlong === 1 ? 0 : m.length * shotIndex / (dotsAlong - 1);
+            const shotY = stageShift - designDepth;
             if (shotY < -fovHalf || shotY > fovHalf) continue;
-            const exposureFraction = (sourceIndex + (shotIndex + 1) / dotsAlong) / m.lineCount;
-            const shotClass = progress >= exposureFraction ? "shot-dot" : "shot-pending";
+            const shotSectionIndex = Math.min(
+              m.sections.length - 1,
+              Math.floor(designDepth / Math.max(Number.EPSILON, m.height))
+            );
+            let exposed = shotSectionIndex < selected.i;
+            if (shotSectionIndex === selected.i) {
+              const sectionAlong = Math.max(0, Math.min(
+                1,
+                (designDepth - selectedDesignStart) / Math.max(Number.EPSILON, selected.actualHeight)
+              ));
+              const exposureFraction = (sourceIndex + sectionAlong) / m.lineCount;
+              exposed = progress > 0 && progress >= exposureFraction;
+            }
+            const shotClass = exposed ? "shot-dot" : "shot-pending";
             s += `<circle class="${shotClass}" cx="${xMap(x)}" cy="${yMap(shotY)}" r="${shotRadius}"></circle>`;
           }
         }
@@ -2203,9 +2217,16 @@ html>body{padding:0}</style>
         q("est-play-label").textContent = "Play motion";
       }
 
-      function completionLimit(section) {
+      function completionLimit(section, lineCount) {
         if (section.state === "safe") return 1;
-        return Math.max(0, Math.min(1, (fovHalf - section.start) / Math.max(Number.EPSILON, section.travel)));
+        let limit = 1;
+        const downwardRate = lineCount * section.actualHeight - section.travel;
+        if (downwardRate > 0) limit = Math.min(limit, fovHalf / downwardRate);
+        if (section.travel > 0) {
+          const firstHighLine = Math.floor(fovHalf * lineCount / section.travel) + 1;
+          if (firstHighLine < lineCount) limit = Math.min(limit, firstHighLine / lineCount);
+        }
+        return Math.max(0, Math.min(1, limit));
       }
 
       function update(resetStep = false) {
@@ -2227,14 +2248,14 @@ html>body{padding:0}</style>
         q("est-shot-context").textContent = `${m.lineCount} lines × ${m.transverse} transverse × ${m.shotsAlong} along Y`;
         const firstPartial = m.sections.find(d => d.state !== "safe");
         const fullySafe = !firstPartial;
-        const completedFraction = fullySafe ? 1 : Math.max(0, Math.min(1, (fovHalf - firstPartial.start) / Math.max(Number.EPSILON, firstPartial.travel)));
+        const completedFraction = fullySafe ? 1 : completionLimit(firstPartial, m.lineCount);
         q("est-status").textContent = fullySafe
           ? "All sections completed"
           : `Subfield #${firstPartial.i + 1}: ${(completedFraction * 100).toFixed(1)}% completed`;
         q("est-status").className = "viz-stat-value" + (fullySafe ? "" : " text-destructive");
         q("est-status-context").textContent = fullySafe
           ? `${fmt(Math.abs(m.sections.at(-1).end), 2)} µm accumulated travel`
-          : `${fmt(Math.min(firstPartial.travel, Math.max(0, fovHalf - firstPartial.start)), 3)} of ${fmt(firstPartial.travel, 3)} µm completed before the +15 µm FOV edge`;
+          : `Ordered segment exposure stops when the active shot reaches the 30 × 30 µm FOV edge`;
         const currentOffset = selected.start + selected.travel * phase;
         q("est-detail").textContent =
           `Subfield ${selectedIndex + 1}: ${(phase * 100).toFixed(0)}% exposed · current wafer offset ${fmt(currentOffset, 3)} µm · ` +
@@ -2253,7 +2274,7 @@ html>body{padding:0}</style>
         phase += elapsed * pace;
         let selectedIndex = Math.max(0, n(controls.step.value) - 1);
         let selected = m.sections[selectedIndex];
-        let limit = completionLimit(selected);
+        let limit = completionLimit(selected, m.lineCount);
         if (phase >= limit && limit < 1) {
           phase = limit;
           update(false);
@@ -2266,7 +2287,7 @@ html>body{padding:0}</style>
           selectedIndex += 1;
           controls.step.value = String(selectedIndex + 1);
           selected = m.sections[selectedIndex];
-          limit = completionLimit(selected);
+          limit = completionLimit(selected, m.lineCount);
           if (phase >= limit && limit < 1) {
             phase = limit;
             update(false);
@@ -2289,7 +2310,7 @@ html>body{padding:0}</style>
       function startMotion() {
         const m = model();
         const selectedIndex = Math.max(0, n(controls.step.value) - 1);
-        const selectedLimit = completionLimit(m.sections[selectedIndex]);
+        const selectedLimit = completionLimit(m.sections[selectedIndex], m.lineCount);
         if ((selectedIndex >= m.sections.length - 1 && phase >= 1) || phase >= selectedLimit) {
           controls.step.value = "1";
           phase = 0;
