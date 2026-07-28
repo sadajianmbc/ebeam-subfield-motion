@@ -1541,7 +1541,7 @@ html>body{padding:0}</style>
             })).sort((a, b) => a.index - b.index);
             const minimumStageSpeedUmSec = slowest ? subfieldHeightUm / (slowest.dwellNs * 1e-9) : 0;
             const maximumStageSpeedUmSec = fastest ? subfieldHeightUm / (fastest.dwellNs * 1e-9) : 0;
-            const stageSpeedUmSec = maximumStageSpeedUmSec;
+            const stageSpeedUmSec = minimumStageSpeedUmSec;
             let completedShots = 0;
             let replayed = 0;
             const replayFovDwell = new Map();
@@ -1913,10 +1913,10 @@ html>body{padding:0}</style>
         const fastestSubfield = parsedPass.fastestSubfield;
         q("est-pass-max-speed").textContent = `${fmt(parsedPass.maximumStageSpeedUmSec / 1000, 6)} mm/s`;
         q("est-pass-max-speed-context").textContent =
-          `Used for the entire pass · set by subfield ${fastestSubfield.index + 1}`;
+          `Comparison only · set by subfield ${fastestSubfield.index + 1}`;
         q("est-pass-speed").textContent = `${fmt(parsedPass.minimumStageSpeedUmSec / 1000, 6)} mm/s`;
         q("est-pass-speed-context").textContent =
-          `Comparison only · set by subfield ${parsedPass.slowestSubfield.index + 1}`;
+          `Used for the entire pass · set by subfield ${parsedPass.slowestSubfield.index + 1}`;
         q("est-pass-shots").textContent = fmt(parsedPass.actualShots, 0);
         q("est-pass-shots-context").textContent =
           `${parsedPass.subfields.length} subfield-height sections analyzed`;
