@@ -1516,7 +1516,8 @@ html>body{padding:0}</style>
                 const low = view.getUint32(i * RECORD_SIZE, true);
                 const y = view.getUint32(i * RECORD_SIZE + 4, true);
                 replayDwellNs += (low >>> 2) & 0x3FFF;
-                const waferY = -(y - firstY) / 1000 + stageSpeedUmSec * replayDwellNs * 1e-9;
+                const designY = -Math.abs(y - firstY) / 1000;
+                const waferY = designY + stageSpeedUmSec * replayDwellNs * 1e-9;
                 if (waferY >= -15 && waferY <= 15) completedShots++;
               }
               replayed += count;
@@ -1730,10 +1731,10 @@ html>body{padding:0}</style>
         const left = 42, top = 30, size = 286;
         const xCenter = (parsedPass.minX + parsedPass.maxX) / 2;
         const mapX = x => left + ((x - xCenter) / 1000 + 15) / 30 * size;
-        const waferY = shot => -(shot.y - parsedPass.firstY) / 1000 +
-          parsedPass.stageSpeedUmSec * shot.cumulativeDwellNs * 1e-9;
+        const currentStageTravel = parsedPass.stageSpeedUmSec * current.cumulativeDwellNs * 1e-9;
+        const waferY = shot => -Math.abs(shot.y - parsedPass.firstY) / 1000 + currentStageTravel;
         const mapY = y => top + (15 - y) / 30 * size;
-        const shotRadius = (0.08 / 30 * size) / 2;
+        const shotRadius = Math.max(0.55, (0.08 / 30 * size) / 2);
         let s = `<title>Whole pass shot-order simulation</title>`;
         s += `<desc>Sampled shots from the complete pass are shown in encoded order while the stage moves at the slowest subfield speed.</desc>`;
         s += `<rect class="safe-band" x="${left}" y="${top}" width="${size}" height="${size}"></rect>`;
@@ -1744,17 +1745,24 @@ html>body{padding:0}</style>
           s += `<line class="gridline" x1="${left - 4}" x2="${left + size}" y1="${yy}" y2="${yy}"></line>`;
           s += `<text class="svg-muted" x="${left - 8}" y="${yy + 4}" text-anchor="end">${tick}</text>`;
         }
-        const start = Math.max(0, visibleCount - 3500);
-        for (let i = start; i < visibleCount; i++) {
+        const visibleShots = [];
+        for (let i = 0; i < visibleCount; i++) {
           const shot = samples[i];
           const y = waferY(shot);
           if (y < -15 || y > 15) continue;
           const x = mapX(shot.x);
           if (x < left || x > left + size) continue;
-          s += `<circle class="shot-dot" cx="${x}" cy="${mapY(y)}" r="${shotRadius}" opacity="0.72"></circle>`;
-          if (i === visibleCount - 1) {
-            s += `<circle cx="${x}" cy="${mapY(y)}" r="${Math.max(2, shotRadius + 1.4)}" fill="none" stroke="var(--viz-series-1)" stroke-width="1"></circle>`;
-          }
+          visibleShots.push({i, x, y});
+        }
+        const displayStride = Math.max(1, Math.ceil(visibleShots.length / 8000));
+        for (let j = 0; j < visibleShots.length; j += displayStride) {
+          const dot = visibleShots[j];
+          s += `<circle class="shot-dot" cx="${dot.x}" cy="${mapY(dot.y)}" r="${shotRadius}" opacity="0.86"></circle>`;
+        }
+        const activeY = waferY(current);
+        const activeX = mapX(current.x);
+        if (activeY >= -15 && activeY <= 15 && activeX >= left && activeX <= left + size) {
+          s += `<circle cx="${activeX}" cy="${mapY(activeY)}" r="${Math.max(2, shotRadius + 1.4)}" fill="none" stroke="var(--viz-series-1)" stroke-width="1"></circle>`;
         }
         s += `<text class="svg-label" x="${left + 7}" y="${mapY(0) - 8}">${(passSimulationPhase * 100).toFixed(0)}% exposed</text>`;
         s += `<text class="svg-label" x="${left + size + 15}" y="${top + 88}" text-anchor="middle">stage +Y</text>`;
