@@ -1383,14 +1383,16 @@ html>body{padding:0}</style>
       let frameRequest = 0;
       let passWorker = null;
       let parsedPass = null;
-      let passSimulationPhase = 0;
       let passSimulationPlaying = false;
       let passSimulationFrame = 0;
       let passSimulationLastTime = 0;
       let exactPassShots = [];
       let exactPassLoadToken = 0;
-      let passSimulationLimit = 1;
-      let exactSectionCompletedShots = 0;
+      const passChunkSize = 100000;
+      const passPrefetchRemaining = 1000;
+      let passBufferStart = 0;
+      let passStreamCursor = 0;
+      let passNextChunkPromise = null;
 
       function n(v) { return Number(v); }
       function fmt(v, digits = 3) {
@@ -1547,6 +1549,7 @@ html>body{padding:0}</style>
             const replayXCenter = (minXAll + maxXAll) / 2;
             const downSign = (maxYAll - firstY) >= (firstY - minYAll) ? -1 : 1;
             const fovStartStage = new Map();
+            const streamCheckpoints = [];
             let stagePositionUm = 0;
             let replayPreviousX = null, replayPreviousY = null;
             let runBlocked = false;
@@ -1556,6 +1559,13 @@ html>body{padding:0}</style>
               const buffer = await passFile.slice(startByte, startByte + count * RECORD_SIZE).arrayBuffer();
               const view = new DataView(buffer);
               for (let i = 0; i < count; i++) {
+                const replayIndex = replayed + i;
+                if (replayIndex % 100000 === 0) {
+                  streamCheckpoints.push({
+                    shotIndex: replayIndex, stagePositionUm,
+                    previousX: replayPreviousX, previousY: replayPreviousY, runBlocked
+                  });
+                }
                 const low = view.getUint32(i * RECORD_SIZE, true);
                 const y = view.getUint32(i * RECORD_SIZE + 4, true);
                 const x = (low >>> 16) & 0xFFFF;
@@ -1597,7 +1607,7 @@ html>body{padding:0}</style>
                 stageSpeedUmSec, minimumStageSpeedUmSec, maximumStageSpeedUmSec,
                 totalDwellNs: cumulativeDwellNs, firstY, downSign,
                 minX: minXAll, maxX: maxXAll, minY: minYAll, maxY: maxYAll,
-                sampleStride, shotSamples, subfieldHeightUm, completedShots, fovSections
+                sampleStride, shotSamples, subfieldHeightUm, completedShots, fovSections, streamCheckpoints
               }
             });
           } catch (error) {
@@ -1681,8 +1691,7 @@ html>body{padding:0}</style>
             passStepInput.max = String(parsedPass.subfields.length);
             passStepInput.value = "1";
             q("est-pass-step-val").textContent = `1 of ${parsedPass.subfields.length}`;
-            passSimulationPhase = 0;
-            loadExactPassSubfield();
+            seekPassStreamToSection();
             passWorker.terminate();
             passWorker = null;
           } else if (message.type === "error") {
@@ -1768,53 +1777,51 @@ html>body{padding:0}</style>
           sections.push({...item, start, end: travel, state: sectionState(start, travel)});
         });
         const selected = Math.min(sections.length - 1, Math.max(0, n(passStepInput.value) - 1));
+        const pageStart = Math.floor(selected / 10) * 10;
+        const displayedSections = sections.slice(pageStart, pageStart + 10);
         const svg = q("est-pass-plot");
         const left = 52, top = 28, width = 438, height = 316;
-        const minY = -16, maxY = Math.max(18, ...sections.map(d => d.end + 1));
+        const minY = Math.min(-16, ...displayedSections.map(d => d.start - 1));
+        const maxY = Math.max(18, ...displayedSections.map(d => d.end + 1));
         const yMap = y => top + (maxY - y) / (maxY - minY) * height;
-        const xMap = i => left + (i + 0.5) / sections.length * width;
-        const barW = Math.max(2, Math.min(24, width / sections.length * 0.64));
+        const xMap = i => left + (i + 0.5) / displayedSections.length * width;
+        const barW = Math.max(2, Math.min(24, width / displayedSections.length * 0.64));
         let s = `<title>Accumulated pass-file subfield position</title>`;
         s += `<rect class="safe-band" x="${left}" y="${yMap(15)}" width="${width}" height="${yMap(-15) - yMap(15)}"></rect>`;
         for (const tick of [15, 10, 5, 0, -5, -10, -15]) {
           s += `<line class="${tick === 0 ? "centerline" : "gridline"}" x1="${left}" x2="${left + width}" y1="${yMap(tick)}" y2="${yMap(tick)}"></line>`;
           s += `<text class="svg-muted" x="${left - 8}" y="${yMap(tick) + 4}" text-anchor="end">${tick}</text>`;
         }
-        sections.forEach((d, i) => {
+        displayedSections.forEach((d, localIndex) => {
+          const i = pageStart + localIndex;
           const cls = d.state === "safe" ? "sub-safe" : d.state === "partial" ? "sub-partial" : "sub-outside";
-          const x = xMap(i), y = Math.min(yMap(d.start), yMap(d.end));
+          const x = xMap(localIndex), y = Math.min(yMap(d.start), yMap(d.end));
           const h = Math.max(3, Math.abs(yMap(d.end) - yMap(d.start)));
           s += `<rect class="${cls}" x="${x - barW / 2}" y="${y}" width="${barW}" height="${h}" rx="2"></rect>`;
           if (i === selected) s += `<rect class="selected-ring" x="${x - barW / 2 - 3}" y="${y - 3}" width="${barW + 6}" height="${h + 6}" rx="3"></rect>`;
-          if (sections.length <= 20 || i === 0 || i === sections.length - 1 || (i + 1) % 5 === 0) {
-            s += `<text class="svg-muted" x="${x}" y="${top + height + 22}" text-anchor="middle">${i + 1}</text>`;
-          }
+          s += `<text class="svg-muted" x="${x}" y="${top + height + 22}" text-anchor="middle">${i + 1}</text>`;
         });
         s += `<text class="svg-muted" x="14" y="${top + height / 2}" transform="rotate(-90 14 ${top + height / 2})" text-anchor="middle">Y relative to FOV center (µm)</text>`;
-        s += `<text class="svg-muted" x="${left + width / 2}" y="${top + height + 44}" text-anchor="middle">Subfield number</text>`;
+        s += `<text class="svg-muted" x="${left + width / 2}" y="${top + height + 44}" text-anchor="middle">Subfield number · showing ${pageStart + 1}–${pageStart + displayedSections.length}</text>`;
         svg.innerHTML = s;
       }
-      async function loadExactPassSubfield() {
-        if (!parsedPass) return;
-        const token = ++exactPassLoadToken;
-        const selectedIndex = Math.min(parsedPass.fovSections.length - 1, Math.max(0, n(passBlockSelect.value)));
-        const section = parsedPass.fovSections[selectedIndex];
+      async function decodePassChunk(chunkStart) {
         const {passFile} = selectedPassPair();
-        if (!passFile || !section) return;
-        stopPassSimulation();
-        exactPassShots = [];
-        q("est-pass-detail").textContent = `Loading every shot in 30 µm FOV section ${selectedIndex + 1}…`;
-        const recordCount = section.lastShot - section.firstShot + 1;
-        const startByte = parsedPass.dataOffset + section.firstShot * 8;
-        const buffer = await passFile.slice(startByte, startByte + recordCount * 8).arrayBuffer();
-        if (token !== exactPassLoadToken) return;
+        if (!parsedPass || !passFile || chunkStart >= parsedPass.actualShots) return [];
+        const checkpoint = parsedPass.streamCheckpoints.find(item => item.shotIndex === chunkStart);
+        if (!checkpoint) throw new Error(`Missing stream checkpoint at shot ${chunkStart + 1}.`);
+        const count = Math.min(passChunkSize, parsedPass.actualShots - chunkStart);
+        const buffer = await passFile.slice(
+          parsedPass.dataOffset + chunkStart * 8,
+          parsedPass.dataOffset + (chunkStart + count) * 8
+        ).arrayBuffer();
         const view = new DataView(buffer);
         const xCenter = (parsedPass.minX + parsedPass.maxX) / 2;
-        let stagePositionUm = section.startStagePositionUm;
-        const timelineStartStage = stagePositionUm;
-        let previousX = null, previousY = null;
-        let runBlocked = false;
-        for (let i = 0; i < recordCount; i++) {
+        let stagePositionUm = checkpoint.stagePositionUm;
+        let previousX = checkpoint.previousX, previousY = checkpoint.previousY;
+        let runBlocked = checkpoint.runBlocked;
+        const shots = [];
+        for (let i = 0; i < count; i++) {
           const low = view.getUint32(i * 8, true);
           const y = view.getUint32(i * 8 + 4, true);
           const x = (low >>> 16) & 0xFFFF;
@@ -1826,49 +1833,51 @@ html>body{padding:0}</style>
             stagePositionUm = Math.max(stagePositionUm, -designY);
             runBlocked = false;
           }
-          const distanceDownNm = Math.max(0, -designY * 1000);
-          const fovSection = Math.floor(distanceDownNm / 30000);
           const waferY = designY + stagePositionUm;
           const waferX = (x - xCenter) / 1000;
           if (!runBlocked && (waferX < -15 || waferX > 15 || waferY < -15 || waferY > 15)) runBlocked = true;
-          if (fovSection === section.index) {
-            exactPassShots.push({
-              index: section.firstShot + i, x, y, dwell, designY,
-              stagePositionUm, timelineNs: (stagePositionUm - timelineStartStage) / parsedPass.stageSpeedUmSec * 1e9,
-              exposable: !runBlocked
-            });
-          }
+          shots.push({
+            index: chunkStart + i, x, y, dwell, designY, stagePositionUm,
+            fovSection: Math.floor(Math.max(0, -designY * 1000) / 30000),
+            exposable: !runBlocked
+          });
           stagePositionUm += parsedPass.stageSpeedUmSec * dwell * 1e-9;
           previousX = x;
           previousY = y;
         }
-        exactSectionCompletedShots = exactPassShots.filter(shot => shot.exposable).length;
-        passSimulationLimit = 1;
-        passSimulationPhase = 0;
+        return shots;
+      }
+      async function seekPassStreamToSection() {
+        if (!parsedPass) return;
+        const token = ++exactPassLoadToken;
+        const selectedIndex = Math.min(parsedPass.fovSections.length - 1, Math.max(0, n(passBlockSelect.value)));
+        const targetShot = parsedPass.fovSections[selectedIndex].firstShot;
+        const chunkStart = Math.floor(targetShot / passChunkSize) * passChunkSize;
+        stopPassSimulation();
+        q("est-pass-detail").textContent = `Loading shot stream at FOV section ${selectedIndex + 1}…`;
+        const shots = await decodePassChunk(chunkStart);
+        if (token !== exactPassLoadToken) return;
+        exactPassShots = shots;
+        passBufferStart = chunkStart;
+        passStreamCursor = Math.max(0, targetShot - chunkStart);
+        passNextChunkPromise = null;
         updatePassSimulation();
       }
       function updatePassSimulation() {
         if (!parsedPass) return;
         const samples = exactPassShots;
         if (!samples.length) return;
-        const selectedIndex = Math.min(parsedPass.fovSections.length - 1, Math.max(0, n(passBlockSelect.value)));
-        const selectedFovSection = parsedPass.fovSections[selectedIndex];
-        const totalTimelineNs = samples.at(-1).timelineNs + samples.at(-1).dwell;
-        const elapsedDwellNs = totalTimelineNs * passSimulationPhase;
-        let low = 0, high = samples.length;
-        while (low < high) {
-          const mid = (low + high) >> 1;
-          if (samples[mid].timelineNs <= elapsedDwellNs) low = mid + 1;
-          else high = mid;
-        }
-        const visibleCount = low;
-        const current = samples[Math.min(samples.length - 1, Math.max(0, visibleCount - 1))];
+        const visibleCount = Math.min(samples.length, Math.max(1, Math.floor(passStreamCursor) + 1));
+        const currentLocalIndex = Math.min(samples.length - 1, visibleCount - 1);
+        const current = samples[currentLocalIndex];
+        const next = samples[Math.min(samples.length - 1, currentLocalIndex + 1)];
+        const fraction = Math.max(0, Math.min(1, passStreamCursor - Math.floor(passStreamCursor)));
         const svg = q("est-pass-fov");
         const left = 42, top = 30, size = 286;
         const xCenter = (parsedPass.minX + parsedPass.maxX) / 2;
         const mapX = x => left + ((x - xCenter) / 1000 + 15) / 30 * size;
-        const currentStagePosition = selectedFovSection.startStagePositionUm + parsedPass.stageSpeedUmSec * elapsedDwellNs * 1e-9;
-        const currentStageTravel = currentStagePosition - selectedFovSection.startStagePositionUm;
+        const currentStagePosition = current.stagePositionUm + (next.stagePositionUm - current.stagePositionUm) * fraction;
+        const currentStageTravel = currentStagePosition;
         const waferY = shot => shot.designY + currentStagePosition;
         const mapY = y => top + (15 - y) / 30 * size;
         const shotRadius = Math.max(0.9, (0.08 / 30 * size) / 2);
@@ -1901,9 +1910,7 @@ html>body{padding:0}</style>
         if (current.exposable && activeY >= -15 && activeY <= 15 && activeX >= left && activeX <= left + size) {
           s += `<circle cx="${activeX}" cy="${mapY(activeY)}" r="${Math.max(2, shotRadius + 1.4)}" fill="none" stroke="var(--viz-series-1)" stroke-width="1"></circle>`;
         }
-        const selectedCompletion = exactPassShots.length ? exactSectionCompletedShots / exactPassShots.length : 0;
-        const exposedSoFar = samples.slice(0, visibleCount).filter(shot => shot.exposable).length;
-        s += `<text class="svg-label" x="${left + 7}" y="${mapY(0) - 8}">${(exposedSoFar / exactPassShots.length * 100).toFixed(1)}% exposed · limit ${(selectedCompletion * 100).toFixed(1)}%</text>`;
+        s += `<text class="svg-label" x="${left + 7}" y="${mapY(0) - 8}">${((current.index + 1) / parsedPass.actualShots * 100).toFixed(2)}% through pass</text>`;
         s += `<line class="stage-arrow" x1="${left + size + 15}" x2="${left + size + 15}" y1="${mapY(-4)}" y2="${mapY(5)}"></line>`;
         s += `<path class="stage-arrow" d="M ${left + size + 10} ${mapY(4)} L ${left + size + 15} ${mapY(5)} L ${left + size + 20} ${mapY(4)} Z"></path>`;
         s += `<text class="svg-label" x="${left + size + 15}" y="${top + 88}" text-anchor="middle">stage +Y</text>`;
@@ -1947,21 +1954,64 @@ html>body{padding:0}</style>
         q("est-pass-detail").textContent =
           `Shot ${(current.index + 1).toLocaleString()} of ${parsedPass.actualShots.toLocaleString()} · ` +
           `X ${(current.x / 1000).toFixed(3)} µm · Y ${(current.y / 1000).toFixed(3)} µm · ${current.dwell} ns dwell · ` +
-          `stage travel ${fmt(currentStageTravel, 3)} µm · ${fmt(exactSectionCompletedShots, 0)} of ${fmt(exactPassShots.length, 0)} section shots can be exposed.`;
+          `stage position ${fmt(currentStagePosition, 3)} µm · streaming ${fmt(passBufferStart + 1, 0)}–${fmt(passBufferStart + exactPassShots.length, 0)}.`;
       }
       function stopPassSimulation() {
         passSimulationPlaying = false;
         if (passSimulationFrame) cancelAnimationFrame(passSimulationFrame);
         passSimulationFrame = 0;
-        passPlayButton.textContent = passSimulationPhase >= passSimulationLimit ? "Replay pass simulation" : "Play pass simulation";
+        const atEnd = parsedPass && passBufferStart + Math.floor(passStreamCursor) >= parsedPass.actualShots - 1;
+        passPlayButton.textContent = atEnd ? "Replay pass simulation" : "Play pass simulation";
+      }
+      async function prefetchNextPassChunk() {
+        if (passNextChunkPromise || !parsedPass) return;
+        const nextStart = passBufferStart + exactPassShots.length;
+        if (nextStart >= parsedPass.actualShots) return;
+        const expectedStart = passBufferStart;
+        passNextChunkPromise = decodePassChunk(nextStart);
+        try {
+          const nextShots = await passNextChunkPromise;
+          if (passBufferStart === expectedStart) exactPassShots = exactPassShots.concat(nextShots);
+        } finally {
+          passNextChunkPromise = null;
+        }
       }
       function animatePassSimulation(timestamp) {
         if (!passSimulationPlaying) return;
         if (!passSimulationLastTime) passSimulationLastTime = timestamp;
-        passSimulationPhase = Math.min(passSimulationLimit, passSimulationPhase + (timestamp - passSimulationLastTime) / 12000 * n(passPaceInput.value));
+        const elapsedSeconds = Math.min(0.1, (timestamp - passSimulationLastTime) / 1000);
         passSimulationLastTime = timestamp;
+        passStreamCursor += elapsedSeconds * n(passPaceInput.value) * 2000;
+        if (exactPassShots.length - passStreamCursor <= passPrefetchRemaining) prefetchNextPassChunk();
+        if (passStreamCursor > passChunkSize + 5000 && exactPassShots.length > passChunkSize) {
+          exactPassShots.splice(0, passChunkSize);
+          passBufferStart += passChunkSize;
+          passStreamCursor -= passChunkSize;
+        }
+        if (passStreamCursor >= exactPassShots.length) {
+          if (passBufferStart + exactPassShots.length >= parsedPass.actualShots) {
+            passStreamCursor = exactPassShots.length - 1;
+            updatePassSimulation();
+            return stopPassSimulation();
+          }
+          passStreamCursor = exactPassShots.length - 1;
+        }
         updatePassSimulation();
-        if (passSimulationPhase >= passSimulationLimit) return stopPassSimulation();
+        const current = exactPassShots[Math.min(exactPassShots.length - 1, Math.floor(passStreamCursor))];
+        const sectionOption = parsedPass.fovSections.findIndex(section => section.index === current.fovSection);
+        if (sectionOption >= 0 && Number(passBlockSelect.value) !== sectionOption) {
+          passBlockSelect.value = String(sectionOption);
+          renderSelectedPassBlock();
+        }
+        const subfieldNumber = Math.min(
+          parsedPass.subfields.length,
+          Math.max(1, Math.floor(Math.max(0, -current.designY) / parsedPass.subfieldHeightUm) + 1)
+        );
+        if (Number(passStepInput.value) !== subfieldNumber) {
+          passStepInput.value = String(subfieldNumber);
+          q("est-pass-step-val").textContent = `${subfieldNumber} of ${parsedPass.subfields.length}`;
+          drawPassPositionPlot();
+        }
         passSimulationFrame = requestAnimationFrame(animatePassSimulation);
       }
       function sectionState(start, end) {
@@ -2237,12 +2287,16 @@ html>body{padding:0}</style>
       passScanButton.addEventListener("click", scanPassFile);
       passBlockSelect.addEventListener("change", () => {
         renderSelectedPassBlock();
-        loadExactPassSubfield();
+        seekPassStreamToSection();
       });
       passPlayButton.addEventListener("click", () => {
         if (!parsedPass) return;
         if (passSimulationPlaying) return stopPassSimulation();
-        if (passSimulationPhase >= passSimulationLimit) passSimulationPhase = 0;
+        if (passBufferStart + Math.floor(passStreamCursor) >= parsedPass.actualShots - 1) {
+          passBlockSelect.value = "0";
+          seekPassStreamToSection();
+          return;
+        }
         passSimulationPlaying = true;
         passSimulationLastTime = 0;
         passPlayButton.textContent = "Pause";
@@ -2250,8 +2304,7 @@ html>body{padding:0}</style>
       });
       passRestartButton.addEventListener("click", () => {
         stopPassSimulation();
-        passSimulationPhase = 0;
-        updatePassSimulation();
+        seekPassStreamToSection();
       });
       passStepInput.addEventListener("input", () => {
         if (!parsedPass) return;
