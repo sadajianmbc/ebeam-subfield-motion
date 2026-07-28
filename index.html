@@ -1553,6 +1553,8 @@ html>body{padding:0}</style>
             const fovStartStage = new Map();
             const streamCheckpoints = [];
             let stagePositionUm = 0;
+            let waitCount = 0;
+            let totalWaitSec = 0;
             let replayPreviousX = null, replayPreviousY = null;
             while (replayed < actualShots) {
               const count = Math.min(CHUNK_RECORDS, actualShots - replayed);
@@ -1574,8 +1576,15 @@ html>body{padding:0}</style>
                 const designY = (y - firstY) * downSign / 1000;
                 const isRunStart = replayPreviousY === null ||
                   Math.abs(y - replayPreviousY) > RUN_GAP_Y_NM;
-                if (isRunStart) {
-                  stagePositionUm = Math.max(stagePositionUm, -designY);
+                const projectedY = designY + stagePositionUm;
+                if (isRunStart || Math.abs(projectedY) > 15) {
+                  const targetStagePositionUm = -designY;
+                  const repositionDistanceUm = Math.abs(targetStagePositionUm - stagePositionUm);
+                  if (repositionDistanceUm > Number.EPSILON) {
+                    stagePositionUm = targetStagePositionUm;
+                    waitCount++;
+                    totalWaitSec += repositionDistanceUm / stageSpeedUmSec;
+                  }
                 }
                 const distanceDownNm = Math.max(0, -designY * 1000);
                 const fovSection = Math.floor(distanceDownNm / 30000);
@@ -1603,7 +1612,8 @@ html>body{padding:0}</style>
                 stageSpeedUmSec, minimumStageSpeedUmSec, maximumStageSpeedUmSec,
                 totalDwellNs: cumulativeDwellNs, firstY, downSign,
                 minX: minXAll, maxX: maxXAll, minY: minYAll, maxY: maxYAll,
-                sampleStride, shotSamples, subfieldHeightUm, completedShots, fovSections, streamCheckpoints
+                sampleStride, shotSamples, subfieldHeightUm, completedShots,
+                waitCount, totalWaitSec, fovSections, streamCheckpoints
               }
             });
           } catch (error) {
@@ -1828,13 +1838,22 @@ html>body{padding:0}</style>
           const designY = (y - parsedPass.firstY) * parsedPass.downSign / 1000;
           const isRunStart = previousY !== null &&
             Math.abs(y - previousY) > passRunGapYNm;
-          if (isRunStart) {
-            stagePositionUm = Math.max(stagePositionUm, -designY);
+          const waitStartStagePositionUm = stagePositionUm;
+          const projectedY = designY + stagePositionUm;
+          let waitBeforeSec = 0;
+          if (isRunStart || Math.abs(projectedY) > fovHalf) {
+            const targetStagePositionUm = -designY;
+            const repositionDistanceUm = Math.abs(targetStagePositionUm - stagePositionUm);
+            if (repositionDistanceUm > Number.EPSILON) {
+              waitBeforeSec = repositionDistanceUm / parsedPass.stageSpeedUmSec;
+              stagePositionUm = targetStagePositionUm;
+            }
           }
           const waferY = designY + stagePositionUm;
           const waferX = (x - xCenter) / 1000;
           shots.push({
-            index: chunkStart + i, x, y, dwell, designY, stagePositionUm,
+            index: chunkStart + i, x, y, dwell, designY,
+            waitStartStagePositionUm, waitBeforeSec, stagePositionUm,
             fovSection: Math.floor(Math.max(0, -designY * 1000) / 30000),
             exposable: waferX >= -15 && waferX <= 15 && waferY >= -15 && waferY <= 15
           });
@@ -1869,6 +1888,8 @@ html>body{padding:0}</style>
         const current = samples[currentLocalIndex];
         const next = samples[Math.min(samples.length - 1, currentLocalIndex + 1)];
         const fraction = Math.max(0, Math.min(1, passStreamCursor - Math.floor(passStreamCursor)));
+        const waitingForNext = next.index !== current.index && next.waitBeforeSec > 0 && fraction > 0;
+        const active = waitingForNext ? next : current;
         const svg = q("est-pass-fov");
         const left = 42, top = 30, size = 286;
         const xCenter = (parsedPass.minX + parsedPass.maxX) / 2;
@@ -1902,12 +1923,16 @@ html>body{padding:0}</style>
           const dot = visibleShots[j];
           s += `<circle class="${dot.exposed ? "shot-dot" : "shot-pending"}" cx="${dot.x}" cy="${mapY(dot.y)}" r="${shotRadius}"></circle>`;
         }
-        const activeY = waferY(current);
-        const activeX = mapX(current.x);
+        const activeY = waferY(active);
+        const activeX = mapX(active.x);
         if (activeY >= -15 && activeY <= 15 && activeX >= left && activeX <= left + size) {
           s += `<circle cx="${activeX}" cy="${mapY(activeY)}" r="${Math.max(2, shotRadius + 1.4)}" fill="none" stroke="var(--viz-series-1)" stroke-width="1"></circle>`;
         }
-        s += `<text class="svg-label" x="${left + 7}" y="${mapY(0) - 8}">${((current.index + 1) / parsedPass.actualShots * 100).toFixed(2)}% through pass</text>`;
+        s += `<text class="svg-label" x="${left + 7}" y="${mapY(0) - 8}">${
+          waitingForNext
+            ? `Waiting for shot ${(next.index + 1).toLocaleString()} at Y = 0`
+            : `${((current.index + 1) / parsedPass.actualShots * 100).toFixed(2)}% through pass`
+        }</text>`;
         s += `<line class="stage-arrow" x1="${left + size + 15}" x2="${left + size + 15}" y1="${mapY(-4)}" y2="${mapY(5)}"></line>`;
         s += `<path class="stage-arrow" d="M ${left + size + 10} ${mapY(4)} L ${left + size + 15} ${mapY(5)} L ${left + size + 20} ${mapY(4)} Z"></path>`;
         s += `<text class="svg-label" x="${left + size + 15}" y="${top + 88}" text-anchor="middle">stage +Y</text>`;
@@ -1918,12 +1943,12 @@ html>body{padding:0}</style>
         const zoomMapX = dx => zoomCenterX + dx * zoomSize;
         const zoomMapY = dy => zoomCenterY - dy * zoomSize;
         const zoomShotRadius = 0.08 * zoomSize / 2;
-        let z = `<title>Beam close-up at encoded shot ${(current.index + 1).toLocaleString()}</title>`;
+        let z = `<title>Beam close-up at encoded shot ${(active.index + 1).toLocaleString()}</title>`;
         z += `<desc>One micrometer square view centered on the active shot. All dots have an eighty nanometer diameter.</desc>`;
         z += `<rect class="safe-band" x="${zoomLeft}" y="${zoomTop}" width="${zoomSize}" height="${zoomSize}"></rect>`;
         for (const dot of visibleShots) {
           const shot = samples[dot.i];
-          const dx = (shot.x - current.x) / 1000;
+          const dx = (shot.x - active.x) / 1000;
           const dy = waferY(shot) - activeY;
           if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) continue;
           z += `<circle class="${dot.exposed ? "shot-dot" : "shot-pending"}" cx="${zoomMapX(dx)}" cy="${zoomMapY(dy)}" r="${zoomShotRadius}"></circle>`;
@@ -1947,11 +1972,14 @@ html>body{padding:0}</style>
           `${parsedPass.subfields.length} subfield-height sections analyzed`;
         q("est-pass-completion").textContent = `${(completion * 100).toFixed(2)}%`;
         q("est-pass-completion-context").textContent =
-          `${fmt(parsedPass.completedShots, 0)} of ${fmt(parsedPass.actualShots, 0)} total shots completed`;
-        q("est-pass-detail").textContent =
-          `Shot ${(current.index + 1).toLocaleString()} of ${parsedPass.actualShots.toLocaleString()} · ` +
-          `X ${(current.x / 1000).toFixed(3)} µm · Y ${(current.y / 1000).toFixed(3)} µm · ${current.dwell} ns dwell · ` +
-          `stage position ${fmt(currentStagePosition, 3)} µm · streaming ${fmt(passBufferStart + 1, 0)}–${fmt(passBufferStart + exactPassShots.length, 0)}.`;
+          `${fmt(parsedPass.completedShots, 0)} of ${fmt(parsedPass.actualShots, 0)} total shots completed · ` +
+          `${fmt(parsedPass.waitCount, 0)} stage waits`;
+        q("est-pass-detail").textContent = waitingForNext
+          ? `Exposure paused after shot ${(current.index + 1).toLocaleString()} · waiting for shot ${(next.index + 1).toLocaleString()} to reach Y = 0 · ` +
+            `stage position ${fmt(currentStagePosition, 3)} µm.`
+          : `Shot ${(current.index + 1).toLocaleString()} of ${parsedPass.actualShots.toLocaleString()} · ` +
+            `X ${(current.x / 1000).toFixed(3)} µm · Y ${(current.y / 1000).toFixed(3)} µm · ${current.dwell} ns dwell · ` +
+            `stage position ${fmt(currentStagePosition, 3)} µm · streaming ${fmt(passBufferStart + 1, 0)}–${fmt(passBufferStart + exactPassShots.length, 0)}.`;
       }
       function stopPassSimulation() {
         passSimulationPlaying = false;
@@ -1978,7 +2006,26 @@ html>body{padding:0}</style>
         if (!passSimulationLastTime) passSimulationLastTime = timestamp;
         const elapsedSeconds = Math.min(0.1, (timestamp - passSimulationLastTime) / 1000);
         passSimulationLastTime = timestamp;
-        passStreamCursor += elapsedSeconds * n(passPaceInput.value) * 2000;
+        const pace = n(passPaceInput.value);
+        const currentIndex = Math.min(exactPassShots.length - 1, Math.floor(passStreamCursor));
+        const nextShot = exactPassShots[Math.min(exactPassShots.length - 1, currentIndex + 1)];
+        if (nextShot.index !== exactPassShots[currentIndex].index && nextShot.waitBeforeSec > 0) {
+          const waitAnimationSec = Math.min(1.5, Math.max(0.3, nextShot.waitBeforeSec * 10));
+          passStreamCursor = Math.min(currentIndex + 1, passStreamCursor + elapsedSeconds * pace / waitAnimationSec);
+        } else {
+          const proposedCursor = passStreamCursor + elapsedSeconds * pace * 2000;
+          const searchEnd = Math.min(exactPassShots.length - 1, Math.floor(proposedCursor) + 1);
+          let nextWaitIndex = -1;
+          for (let i = currentIndex + 1; i <= searchEnd; i++) {
+            if (exactPassShots[i].waitBeforeSec > 0) {
+              nextWaitIndex = i;
+              break;
+            }
+          }
+          passStreamCursor = nextWaitIndex >= 0 && proposedCursor >= nextWaitIndex
+            ? nextWaitIndex - 1
+            : proposedCursor;
+        }
         if (exactPassShots.length - passStreamCursor <= passPrefetchRemaining) prefetchNextPassChunk();
         if (passStreamCursor > passChunkSize + 5000 && exactPassShots.length > passChunkSize) {
           exactPassShots.splice(0, passChunkSize);
