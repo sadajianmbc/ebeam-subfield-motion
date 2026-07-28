@@ -1798,7 +1798,7 @@ html>body{padding:0}</style>
         const currentStageTravel = parsedPass.stageSpeedUmSec * (priorDwellNs + current.localDwellNs) * 1e-9;
         const waferY = shot => -Math.abs(shot.y - parsedPass.firstY) / 1000 + currentStageTravel;
         const mapY = y => top + (15 - y) / 30 * size;
-        const shotRadius = Math.max(0.55, (0.08 / 30 * size) / 2);
+        const shotRadius = Math.max(0.9, (0.08 / 30 * size) / 2);
         let s = `<title>Whole pass shot-order simulation</title>`;
         s += `<desc>Sampled shots from the complete pass are shown in encoded order while the stage moves at the slowest subfield speed.</desc>`;
         s += `<rect class="safe-band" x="${left}" y="${top}" width="${size}" height="${size}"></rect>`;
@@ -1821,7 +1821,7 @@ html>body{padding:0}</style>
         const displayStride = Math.max(1, Math.ceil(visibleShots.length / 8000));
         for (let j = 0; j < visibleShots.length; j += displayStride) {
           const dot = visibleShots[j];
-          s += `<circle class="shot-dot" cx="${dot.x}" cy="${mapY(dot.y)}" r="${shotRadius}" opacity="0.86"></circle>`;
+          s += `<circle class="shot-dot" cx="${dot.x}" cy="${mapY(dot.y)}" r="${shotRadius}" opacity="1"></circle>`;
         }
         const activeY = waferY(current);
         const activeX = mapX(current.x);
@@ -1832,7 +1832,7 @@ html>body{padding:0}</style>
         s += `<line class="stage-arrow" x1="${left + size + 15}" x2="${left + size + 15}" y1="${mapY(-4)}" y2="${mapY(5)}"></line>`;
         s += `<path class="stage-arrow" d="M ${left + size + 10} ${mapY(4)} L ${left + size + 15} ${mapY(5)} L ${left + size + 20} ${mapY(4)} Z"></path>`;
         s += `<text class="svg-label" x="${left + size + 15}" y="${top + 88}" text-anchor="middle">stage +Y</text>`;
-        s += `<text class="svg-muted" x="${left + size / 2}" y="${top + size + 24}" text-anchor="middle">80 nm shot diameter · shot ${(current.index + 1).toLocaleString()} · dwell ${current.dwell} ns</text>`;
+        s += `<text class="svg-muted" x="${left + size / 2}" y="${top + size + 24}" text-anchor="middle">80 nm shots · overview size enhanced for visibility · shot ${(current.index + 1).toLocaleString()}</text>`;
         svg.innerHTML = s;
         const zoomSvg = q("est-pass-zoom");
         const zoomLeft = 93, zoomTop = 8, zoomSize = 126, zoomCenterX = zoomLeft + zoomSize / 2, zoomCenterY = zoomTop + zoomSize / 2;
