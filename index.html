@@ -1151,6 +1151,10 @@ html>body{padding:0}</style>
         Detected pass file
         <select id="est-pass-choice" class="form-select"></select>
       </label>
+      <label class="form-label">
+        Subfield height (µm)
+        <input id="est-pass-height" class="form-control" type="number" min="0.1" max="30" step="0.1" value="5">
+      </label>
     </div>
     <div class="viz-row pass-actions">
       <button id="est-pass-scan" type="button" class="btn btn-primary" disabled>Scan pass file</button>
@@ -1163,6 +1167,25 @@ html>body{padding:0}</style>
         <select id="est-pass-block" class="form-select"></select>
       </label>
       <div id="est-pass-block-detail" class="text-small text-muted" aria-live="polite"></div>
+    </div>
+    <div id="est-pass-simulator" hidden>
+      <div class="viz-grid metrics">
+        <div class="card viz-stat">
+          <div class="text-muted">Constant stage speed</div>
+          <div id="est-pass-speed" class="viz-stat-value">—</div>
+          <div id="est-pass-speed-context" class="text-small text-muted"></div>
+        </div>
+        <div class="card viz-stat">
+          <div class="text-muted">Pass completion</div>
+          <div id="est-pass-completion" class="viz-stat-value">0%</div>
+          <div id="est-pass-completion-context" class="text-small text-muted"></div>
+        </div>
+      </div>
+      <svg id="est-pass-fov" viewBox="0 0 620 360" role="img" aria-label="Pass-file shots moving through the fixed field of view"></svg>
+      <div class="motion-actions">
+        <button id="est-pass-play" type="button" class="btn btn-primary">Play pass simulation</button>
+        <button id="est-pass-restart" type="button" class="btn">Restart</button>
+      </div>
     </div>
   </section>
 
@@ -1276,6 +1299,10 @@ html>body{padding:0}</style>
       const passResult = q("est-pass-result");
       const passBlockSelect = q("est-pass-block");
       const passBlockDetail = q("est-pass-block-detail");
+      const passHeightInput = q("est-pass-height");
+      const passSimulator = q("est-pass-simulator");
+      const passPlayButton = q("est-pass-play");
+      const passRestartButton = q("est-pass-restart");
       const markerNm = 2;
       const fovHalf = 15;
       let phase = 0;
@@ -1285,6 +1312,10 @@ html>body{padding:0}</style>
       let passWorker = null;
       let parsedPass = null;
       let detectedPassFiles = [];
+      let passSimulationPhase = 0;
+      let passSimulationPlaying = false;
+      let passSimulationFrame = 0;
+      let passSimulationLastTime = 0;
 
       function n(v) { return Number(v); }
       function fmt(v, digits = 3) {
@@ -1311,7 +1342,7 @@ html>body{padding:0}</style>
         const CHUNK_RECORDS = 500000;
 
         self.onmessage = async event => {
-          const {passFile, metaFile} = event.data;
+          const {passFile, metaFile, subfieldHeightUm} = event.data;
           try {
             const headerSource = metaFile || passFile;
             const headerBuffer = await headerSource.slice(0, HEADER_SIZE).arrayBuffer();
@@ -1340,6 +1371,13 @@ html>body{padding:0}</style>
             let previousX = null;
             let previousY = null;
             let processed = 0;
+            let firstY = null;
+            let minXAll = Infinity, maxXAll = -Infinity, minYAll = Infinity, maxYAll = -Infinity;
+            let cumulativeDwellNs = 0;
+            const bandDwell = new Map();
+            const bandShots = new Map();
+            const sampleStride = Math.max(1, Math.ceil(actualShots / 50000));
+            const shotSamples = [];
 
             const startBlock = (index, x, y, dwell) => ({
               startShot: index,
@@ -1372,6 +1410,16 @@ html>body{padding:0}</style>
                 const dwell = (low >>> 2) & 0x3FFF;
                 const x = (low >>> 16) & 0xFFFF;
                 const globalIndex = processed + i;
+                if (firstY === null) firstY = y;
+                minXAll = Math.min(minXAll, x); maxXAll = Math.max(maxXAll, x);
+                minYAll = Math.min(minYAll, y); maxYAll = Math.max(maxYAll, y);
+                cumulativeDwellNs += dwell;
+                const band = Math.floor(Math.abs(y - firstY) / Math.max(1, subfieldHeightUm * 1000));
+                bandDwell.set(band, (bandDwell.get(band) || 0) + dwell);
+                bandShots.set(band, (bandShots.get(band) || 0) + 1);
+                if (globalIndex % sampleStride === 0 || globalIndex === actualShots - 1) {
+                  shotSamples.push({index: globalIndex, x, y, dwell, cumulativeDwellNs});
+                }
                 if (current && previousY !== null && Math.abs(y - previousY) > BLOCK_GAP_NM) {
                   finishBlock(current);
                   current = null;
@@ -1393,12 +1441,41 @@ html>body{padding:0}</style>
                 previousY = y;
               }
               processed += count;
-              self.postMessage({type: "progress", processed, total: actualShots});
+              self.postMessage({type: "progress", processed, total: actualShots * 2});
             }
             finishBlock(current);
+            const subfields = Array.from(bandDwell, ([index, dwellNs]) => ({
+              index, dwellNs, shotCount: bandShots.get(index) || 0
+            })).sort((a, b) => a.index - b.index);
+            const slowest = subfields.reduce((best, item) => !best || item.dwellNs > best.dwellNs ? item : best, null);
+            const stageSpeedUmSec = slowest ? subfieldHeightUm / (slowest.dwellNs * 1e-9) : 0;
+            let completedShots = 0;
+            let replayed = 0;
+            let replayDwellNs = 0;
+            while (replayed < actualShots) {
+              const count = Math.min(CHUNK_RECORDS, actualShots - replayed);
+              const startByte = dataOffset + replayed * RECORD_SIZE;
+              const buffer = await passFile.slice(startByte, startByte + count * RECORD_SIZE).arrayBuffer();
+              const view = new DataView(buffer);
+              for (let i = 0; i < count; i++) {
+                const low = view.getUint32(i * RECORD_SIZE, true);
+                const y = view.getUint32(i * RECORD_SIZE + 4, true);
+                replayDwellNs += (low >>> 2) & 0x3FFF;
+                const waferY = -(y - firstY) / 1000 + stageSpeedUmSec * replayDwellNs * 1e-9;
+                if (waferY >= -15 && waferY <= 15) completedShots++;
+              }
+              replayed += count;
+              self.postMessage({type: "progress", processed: actualShots + replayed, total: actualShots * 2});
+            }
             self.postMessage({
               type: "complete",
-              result: {version, expectedShots, actualShots, dataOffset, fileSize: passFile.size, hasSidecar: Boolean(metaFile), blocks}
+              result: {
+                version, expectedShots, actualShots, dataOffset, fileSize: passFile.size,
+                hasSidecar: Boolean(metaFile), blocks, subfields, slowestSubfield: slowest,
+                stageSpeedUmSec, totalDwellNs: cumulativeDwellNs, firstY,
+                minX: minXAll, maxX: maxXAll, minY: minYAll, maxY: maxYAll,
+                sampleStride, shotSamples, subfieldHeightUm, completedShots
+              }
             });
           } catch (error) {
             self.postMessage({type: "error", message: error instanceof Error ? error.message : String(error)});
@@ -1472,6 +1549,9 @@ html>body{padding:0}</style>
       function scanPassFile() {
         const {passFile, metaFile} = selectedPassPair();
         if (!passFile) return;
+        if (!passHeightInput.checkValidity()) return;
+        stopPassSimulation();
+        passSimulator.hidden = true;
         if (passWorker) passWorker.terminate();
         passWorker = createPassWorker();
         parsedPass = null;
@@ -1502,6 +1582,9 @@ html>body{padding:0}</style>
             });
             passResult.hidden = parsedPass.blocks.length === 0;
             renderSelectedPassBlock();
+            passSimulator.hidden = false;
+            passSimulationPhase = 0;
+            updatePassSimulation();
             passWorker.terminate();
             passWorker = null;
           } else if (message.type === "error") {
@@ -1522,7 +1605,62 @@ html>body{padding:0}</style>
           passWorker = null;
         };
         passStatus.className = "text-small text-muted";
-        passWorker.postMessage({passFile, metaFile});
+        passWorker.postMessage({passFile, metaFile, subfieldHeightUm: n(passHeightInput.value)});
+      }
+      function updatePassSimulation() {
+        if (!parsedPass) return;
+        const samples = parsedPass.shotSamples;
+        const visibleCount = Math.max(1, Math.floor(samples.length * passSimulationPhase));
+        const current = samples[Math.min(samples.length - 1, visibleCount - 1)];
+        const svg = q("est-pass-fov");
+        const left = 62, top = 24, size = 300;
+        const xCenter = (parsedPass.minX + parsedPass.maxX) / 2;
+        const mapX = x => left + ((x - xCenter) / 1000 + 15) / 30 * size;
+        const waferY = shot => -(shot.y - parsedPass.firstY) / 1000 +
+          parsedPass.stageSpeedUmSec * shot.cumulativeDwellNs * 1e-9;
+        const mapY = y => top + (15 - y) / 30 * size;
+        let s = `<title>Whole pass shot-order simulation</title>`;
+        s += `<desc>Sampled shots from the complete pass are shown in encoded order while the stage moves at the slowest subfield speed.</desc>`;
+        s += `<rect class="safe-band" x="${left}" y="${top}" width="${size}" height="${size}"></rect>`;
+        s += `<rect class="fov-edge" x="${left}" y="${top}" width="${size}" height="${size}"></rect>`;
+        s += `<line class="centerline" x1="${left}" x2="${left + size}" y1="${mapY(0)}" y2="${mapY(0)}"></line>`;
+        const start = Math.max(0, visibleCount - 3500);
+        for (let i = start; i < visibleCount; i++) {
+          const shot = samples[i];
+          const y = waferY(shot);
+          if (y < -15 || y > 15) continue;
+          const x = mapX(shot.x);
+          if (x < left || x > left + size) continue;
+          s += `<circle class="shot-dot" cx="${x}" cy="${mapY(y)}" r="${i === visibleCount - 1 ? 2.4 : 1.1}" opacity="${i === visibleCount - 1 ? 1 : 0.42}"></circle>`;
+        }
+        s += `<text class="svg-muted" x="${left + size / 2}" y="${top + size + 24}" text-anchor="middle">30 × 30 µm fixed E-beam FOV</text>`;
+        s += `<text class="svg-label" x="398" y="58">Encoded shot ${(current.index + 1).toLocaleString()}</text>`;
+        s += `<text class="svg-muted" x="398" y="84">X ${(current.x / 1000).toFixed(3)} µm</text>`;
+        s += `<text class="svg-muted" x="398" y="106">Y ${(current.y / 1000).toFixed(3)} µm</text>`;
+        s += `<text class="svg-muted" x="398" y="128">Dwell ${current.dwell} ns</text>`;
+        svg.innerHTML = s;
+        const completion = parsedPass.completedShots / parsedPass.actualShots;
+        q("est-pass-speed").textContent = `${fmt(parsedPass.stageSpeedUmSec / 1000, 6)} mm/s`;
+        q("est-pass-speed-context").textContent =
+          `Set by subfield ${parsedPass.slowestSubfield.index + 1}, the slowest of ${parsedPass.subfields.length} height sections`;
+        q("est-pass-completion").textContent = `${(completion * 100).toFixed(2)}%`;
+        q("est-pass-completion-context").textContent =
+          `${fmt(parsedPass.completedShots, 0)} of ${fmt(parsedPass.actualShots, 0)} shots remain inside the FOV`;
+      }
+      function stopPassSimulation() {
+        passSimulationPlaying = false;
+        if (passSimulationFrame) cancelAnimationFrame(passSimulationFrame);
+        passSimulationFrame = 0;
+        passPlayButton.textContent = passSimulationPhase >= 1 ? "Replay pass simulation" : "Play pass simulation";
+      }
+      function animatePassSimulation(timestamp) {
+        if (!passSimulationPlaying) return;
+        if (!passSimulationLastTime) passSimulationLastTime = timestamp;
+        passSimulationPhase = Math.min(1, passSimulationPhase + (timestamp - passSimulationLastTime) / 12000);
+        passSimulationLastTime = timestamp;
+        updatePassSimulation();
+        if (passSimulationPhase >= 1) return stopPassSimulation();
+        passSimulationFrame = requestAnimationFrame(animatePassSimulation);
       }
       function sectionState(start, end) {
         if (start > fovHalf) return "outside";
@@ -1774,8 +1912,29 @@ html>body{padding:0}</style>
       });
       passFolderInput.addEventListener("change", loadPassFolder);
       passChoiceSelect.addEventListener("change", updatePassFileState);
+      passHeightInput.addEventListener("change", () => {
+        if (parsedPass) {
+          parsedPass = null;
+          passSimulator.hidden = true;
+          passStatus.textContent = "Subfield height changed. Scan the pass file again to recalculate stage speed.";
+        }
+      });
       passScanButton.addEventListener("click", scanPassFile);
       passBlockSelect.addEventListener("change", renderSelectedPassBlock);
+      passPlayButton.addEventListener("click", () => {
+        if (!parsedPass) return;
+        if (passSimulationPlaying) return stopPassSimulation();
+        if (passSimulationPhase >= 1) passSimulationPhase = 0;
+        passSimulationPlaying = true;
+        passSimulationLastTime = 0;
+        passPlayButton.textContent = "Pause";
+        passSimulationFrame = requestAnimationFrame(animatePassSimulation);
+      });
+      passRestartButton.addEventListener("click", () => {
+        stopPassSimulation();
+        passSimulationPhase = 0;
+        updatePassSimulation();
+      });
       update(true);
       if (globalThis.lucide) lucide.createIcons({attrs: {width: 16, height: 16}});
     })();
