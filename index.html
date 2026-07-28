@@ -872,6 +872,25 @@ html>body{padding:0}</style>
       gap: 12px;
       margin-bottom: 14px;
     }
+    #ebeam-subfield-tracker .pass-panel { margin-bottom: 14px; }
+    #ebeam-subfield-tracker .pass-controls {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(180px, 1fr));
+      gap: 12px;
+      align-items: end;
+    }
+    #ebeam-subfield-tracker .pass-actions { margin-top: 10px; }
+    #ebeam-subfield-tracker .pass-progress {
+      width: 100%;
+      margin-top: 10px;
+    }
+    #ebeam-subfield-tracker .pass-result {
+      display: grid;
+      grid-template-columns: minmax(180px, 0.7fr) minmax(240px, 1.3fr);
+      gap: 12px;
+      margin-top: 10px;
+      align-items: end;
+    }
     #ebeam-subfield-tracker .form-label { min-width: 0; }
     #ebeam-subfield-tracker .control-head {
       display: flex;
@@ -987,12 +1006,40 @@ html>body{padding:0}</style>
     #ebeam-subfield-tracker .swatch.outside { background: var(--destructive); }
     @media (max-width: 680px) {
       #ebeam-subfield-tracker .controls-grid { grid-template-columns: repeat(2, minmax(130px, 1fr)); }
+      #ebeam-subfield-tracker .pass-controls,
+      #ebeam-subfield-tracker .pass-result { grid-template-columns: 1fr; }
       #ebeam-subfield-tracker .visual-grid { grid-template-columns: 1fr; }
     }
     @media (max-width: 420px) {
       #ebeam-subfield-tracker .controls-grid { grid-template-columns: 1fr; }
     }
   </style>
+
+  <section class="card pass-panel" aria-labelledby="est-pass-heading">
+    <h3 id="est-pass-heading">Load a Multibeam pass file</h3>
+    <div class="pass-controls">
+      <label class="form-label">
+        Pass file
+        <input id="est-pass-file" class="form-control" type="file" accept=".pass,application/octet-stream">
+      </label>
+      <label class="form-label">
+        Metadata sidecar <span class="text-muted">(optional)</span>
+        <input id="est-pass-meta" class="form-control" type="file" accept=".meta,.pass.meta,application/octet-stream">
+      </label>
+    </div>
+    <div class="viz-row pass-actions">
+      <button id="est-pass-scan" type="button" class="btn btn-primary" disabled>Scan pass file</button>
+      <span id="est-pass-status" class="text-small text-muted" aria-live="polite">Choose a .pass file to begin. Files are processed locally and are not uploaded.</span>
+    </div>
+    <progress id="est-pass-progress" class="pass-progress" max="100" value="0" hidden aria-label="Pass file scan progress"></progress>
+    <div id="est-pass-result" class="pass-result" hidden>
+      <label class="form-label">
+        Detected geometry block
+        <select id="est-pass-block" class="form-select"></select>
+      </label>
+      <div id="est-pass-block-detail" class="text-small text-muted" aria-live="polite"></div>
+    </div>
+  </section>
 
   <div class="viz-controls controls-grid" aria-label="Simulation inputs">
     <label class="form-label">
@@ -1090,16 +1137,227 @@ html>body{padding:0}</style>
       };
       const playButton = q("est-play");
       const restartButton = q("est-restart");
+      const passFileInput = q("est-pass-file");
+      const passMetaInput = q("est-pass-meta");
+      const passScanButton = q("est-pass-scan");
+      const passStatus = q("est-pass-status");
+      const passProgress = q("est-pass-progress");
+      const passResult = q("est-pass-result");
+      const passBlockSelect = q("est-pass-block");
+      const passBlockDetail = q("est-pass-block-detail");
       const markerNm = 2;
       const fovHalf = 15;
       let phase = 0;
       let playing = false;
       let lastFrameTime = 0;
       let frameRequest = 0;
+      let passWorker = null;
+      let parsedPass = null;
 
       function n(v) { return Number(v); }
       function fmt(v, digits = 3) {
         return Number(v).toLocaleString(undefined, {maximumFractionDigits: digits});
+      }
+      function fmtBytes(bytes) {
+        if (bytes < 1024) return bytes + " B";
+        const units = ["KB", "MB", "GB", "TB"];
+        let value = bytes / 1024;
+        let unit = units[0];
+        for (let i = 1; i < units.length && value >= 1024; i++) {
+          value /= 1024;
+          unit = units[i];
+        }
+        return fmt(value, value >= 100 ? 0 : value >= 10 ? 1 : 2) + " " + unit;
+      }
+      function passWorkerMain() {
+        const MAGIC = 0xB3D11982;
+        const HEADER_SIZE = 78;
+        const RECORD_SIZE = 8;
+        const BLOCK_GAP_NM = 9000;
+        const DENSE_GAP_NM = 60;
+        const DENSITY_MARGIN = 0.15;
+        const CHUNK_RECORDS = 500000;
+
+        self.onmessage = async event => {
+          const {passFile, metaFile} = event.data;
+          try {
+            const headerSource = metaFile || passFile;
+            const headerBuffer = await headerSource.slice(0, HEADER_SIZE).arrayBuffer();
+            if (headerBuffer.byteLength < HEADER_SIZE) throw new Error("The pass header is shorter than 78 bytes.");
+            const header = new DataView(headerBuffer);
+            const magic = header.getUint32(0, true);
+            const version = header.getUint16(4, true);
+            const expectedShotsBig = header.getBigUint64(48, true);
+            if (magic !== MAGIC) throw new Error("This is not a recognized Multibeam pass file.");
+            if (version !== 2) throw new Error("Only Multibeam V2 pass records are currently supported.");
+            if (expectedShotsBig > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error("The shot count is too large for browser processing.");
+
+            const dataOffset = metaFile ? 0 : HEADER_SIZE;
+            const dataBytes = passFile.size - dataOffset;
+            if (dataBytes < 0 || dataBytes % RECORD_SIZE !== 0) {
+              throw new Error("The shot-data size is not divisible into 8-byte V2 records.");
+            }
+            const actualShots = dataBytes / RECORD_SIZE;
+            const expectedShots = Number(expectedShotsBig);
+            if (actualShots !== expectedShots) {
+              throw new Error(`Header reports ${expectedShots.toLocaleString()} shots, but the file contains ${actualShots.toLocaleString()}.`);
+            }
+
+            const blocks = [];
+            let current = null;
+            let previousX = null;
+            let previousY = null;
+            let processed = 0;
+
+            const startBlock = (index, x, y, dwell) => ({
+              startShot: index,
+              shotCount: 0,
+              minX: x, maxX: x, minY: y, maxY: y,
+              minDwell: dwell, maxDwell: dwell,
+              transitions: 0, denseX: 0, denseY: 0
+            });
+            const finishBlock = block => {
+              if (!block) return;
+              const fx = block.transitions ? block.denseX / block.transitions : 0;
+              const fy = block.transitions ? block.denseY / block.transitions : 0;
+              block.kind = fy - fx >= DENSITY_MARGIN ? "vertical" : fx - fy >= DENSITY_MARGIN ? "horizontal" : "via/other";
+              block.denseXFraction = fx;
+              block.denseYFraction = fy;
+              delete block.transitions;
+              delete block.denseX;
+              delete block.denseY;
+              blocks.push(block);
+            };
+
+            while (processed < actualShots) {
+              const count = Math.min(CHUNK_RECORDS, actualShots - processed);
+              const startByte = dataOffset + processed * RECORD_SIZE;
+              const buffer = await passFile.slice(startByte, startByte + count * RECORD_SIZE).arrayBuffer();
+              const view = new DataView(buffer);
+              for (let i = 0; i < count; i++) {
+                const low = view.getUint32(i * RECORD_SIZE, true);
+                const y = view.getUint32(i * RECORD_SIZE + 4, true);
+                const dwell = (low >>> 2) & 0x3FFF;
+                const x = (low >>> 16) & 0xFFFF;
+                const globalIndex = processed + i;
+                if (current && previousY !== null && Math.abs(y - previousY) > BLOCK_GAP_NM) {
+                  finishBlock(current);
+                  current = null;
+                }
+                if (!current) current = startBlock(globalIndex, x, y, dwell);
+                if (current.shotCount > 0) {
+                  current.transitions++;
+                  if (Math.abs(x - previousX) <= DENSE_GAP_NM) current.denseX++;
+                  if (Math.abs(y - previousY) <= DENSE_GAP_NM) current.denseY++;
+                }
+                current.shotCount++;
+                if (x < current.minX) current.minX = x;
+                if (x > current.maxX) current.maxX = x;
+                if (y < current.minY) current.minY = y;
+                if (y > current.maxY) current.maxY = y;
+                if (dwell < current.minDwell) current.minDwell = dwell;
+                if (dwell > current.maxDwell) current.maxDwell = dwell;
+                previousX = x;
+                previousY = y;
+              }
+              processed += count;
+              self.postMessage({type: "progress", processed, total: actualShots});
+            }
+            finishBlock(current);
+            self.postMessage({
+              type: "complete",
+              result: {version, expectedShots, actualShots, dataOffset, fileSize: passFile.size, hasSidecar: Boolean(metaFile), blocks}
+            });
+          } catch (error) {
+            self.postMessage({type: "error", message: error instanceof Error ? error.message : String(error)});
+          }
+        };
+      }
+      function createPassWorker() {
+        const source = `(${passWorkerMain.toString()})()`;
+        const workerUrl = URL.createObjectURL(new Blob([source], {type: "text/javascript"}));
+        const worker = new Worker(workerUrl);
+        URL.revokeObjectURL(workerUrl);
+        return worker;
+      }
+      function updatePassFileState() {
+        const passFile = passFileInput.files[0];
+        passScanButton.disabled = !passFile;
+        passResult.hidden = true;
+        parsedPass = null;
+        if (!passFile) {
+          passStatus.textContent = "Choose a .pass file to begin. Files are processed locally and are not uploaded.";
+          return;
+        }
+        const metaFile = passMetaInput.files[0];
+        passStatus.textContent = `${passFile.name} · ${fmtBytes(passFile.size)}${metaFile ? ` · metadata: ${metaFile.name}` : " · no metadata sidecar selected"}`;
+      }
+      function renderSelectedPassBlock() {
+        if (!parsedPass) return;
+        const block = parsedPass.blocks[Number(passBlockSelect.value)];
+        if (!block) return;
+        const xSpan = (block.maxX - block.minX) / 1000;
+        const ySpan = (block.maxY - block.minY) / 1000;
+        const dwellText = block.minDwell === block.maxDwell
+          ? `${block.minDwell} ns dwell`
+          : `${block.minDwell}–${block.maxDwell} ns dwell`;
+        passBlockDetail.textContent =
+          `${fmt(block.shotCount, 0)} shots · ${block.kind} · X ${fmt(xSpan, 3)} µm × Y ${fmt(ySpan, 3)} µm · ${dwellText} · records ${fmt(block.startShot + 1, 0)}–${fmt(block.startShot + block.shotCount, 0)}`;
+      }
+      function scanPassFile() {
+        const passFile = passFileInput.files[0];
+        if (!passFile) return;
+        if (passWorker) passWorker.terminate();
+        passWorker = createPassWorker();
+        parsedPass = null;
+        passResult.hidden = true;
+        passProgress.hidden = false;
+        passProgress.value = 0;
+        passScanButton.disabled = true;
+        passStatus.textContent = `Scanning ${passFile.name} locally…`;
+        passWorker.onmessage = event => {
+          const message = event.data;
+          if (message.type === "progress") {
+            const percent = message.total ? message.processed / message.total * 100 : 0;
+            passProgress.value = percent;
+            passStatus.textContent = `Scanning locally… ${percent.toFixed(1)}% · ${fmt(message.processed, 0)} of ${fmt(message.total, 0)} shots`;
+          } else if (message.type === "complete") {
+            parsedPass = message.result;
+            passProgress.value = 100;
+            passProgress.hidden = true;
+            passScanButton.disabled = false;
+            passStatus.textContent =
+              `Multibeam V${parsedPass.version} · ${fmt(parsedPass.actualShots, 0)} shots · ${parsedPass.blocks.length} geometry blocks · ${fmtBytes(parsedPass.fileSize)} · ${parsedPass.hasSidecar ? "sidecar header" : "inline header"}`;
+            passBlockSelect.innerHTML = "";
+            parsedPass.blocks.forEach((block, index) => {
+              const option = document.createElement("option");
+              option.value = String(index);
+              option.textContent = `#${index + 1} · ${block.kind} · ${fmt(block.shotCount, 0)} shots`;
+              passBlockSelect.appendChild(option);
+            });
+            passResult.hidden = parsedPass.blocks.length === 0;
+            renderSelectedPassBlock();
+            passWorker.terminate();
+            passWorker = null;
+          } else if (message.type === "error") {
+            passProgress.hidden = true;
+            passScanButton.disabled = false;
+            passStatus.textContent = message.message;
+            passStatus.className = "text-small text-destructive";
+            passWorker.terminate();
+            passWorker = null;
+          }
+        };
+        passWorker.onerror = () => {
+          passProgress.hidden = true;
+          passScanButton.disabled = false;
+          passStatus.textContent = "The local pass-file scanner stopped unexpectedly.";
+          passStatus.className = "text-small text-destructive";
+          passWorker.terminate();
+          passWorker = null;
+        };
+        passStatus.className = "text-small text-muted";
+        passWorker.postMessage({passFile, metaFile: passMetaInput.files[0] || null});
       }
       function sectionState(start, end) {
         if (start > fovHalf) return "outside";
@@ -1318,6 +1576,10 @@ html>body{padding:0}</style>
         phase = 0;
         update(false);
       });
+      passFileInput.addEventListener("change", updatePassFileState);
+      passMetaInput.addEventListener("change", updatePassFileState);
+      passScanButton.addEventListener("click", scanPassFile);
+      passBlockSelect.addEventListener("change", renderSelectedPassBlock);
       update(true);
       if (globalThis.lucide) lucide.createIcons({attrs: {width: 16, height: 16}});
     })();
