@@ -1544,9 +1544,12 @@ html>body{padding:0}</style>
             const stageSpeedUmSec = minimumStageSpeedUmSec;
             let completedShots = 0;
             let replayed = 0;
-            const replayFovDwell = new Map();
-            const stoppedFovSections = new Set();
             const replayXCenter = (minXAll + maxXAll) / 2;
+            const downSign = (maxYAll - firstY) >= (firstY - minYAll) ? -1 : 1;
+            const fovStartStage = new Map();
+            let stagePositionUm = 0;
+            let replayPreviousX = null, replayPreviousY = null;
+            let runBlocked = false;
             while (replayed < actualShots) {
               const count = Math.min(CHUNK_RECORDS, actualShots - replayed);
               const startByte = dataOffset + replayed * RECORD_SIZE;
@@ -1557,29 +1560,42 @@ html>body{padding:0}</style>
                 const y = view.getUint32(i * RECORD_SIZE + 4, true);
                 const x = (low >>> 16) & 0xFFFF;
                 const dwell = (low >>> 2) & 0x3FFF;
-                const fovSection = Math.floor(Math.abs(y - firstY) / 30000);
-                const localDwell = (replayFovDwell.get(fovSection) || 0) + dwell;
-                replayFovDwell.set(fovSection, localDwell);
-                if (stoppedFovSections.has(fovSection)) continue;
-                const designY = -(Math.abs(y - firstY) - fovSection * 30000) / 1000;
-                const waferY = designY + stageSpeedUmSec * localDwell * 1e-9;
+                const designY = (y - firstY) * downSign / 1000;
+                const isRunStart = replayPreviousY === null ||
+                  Math.abs(x - replayPreviousX) >= 30000 ||
+                  Math.abs(y - replayPreviousY) >= 30000;
+                if (isRunStart) {
+                  stagePositionUm = Math.max(stagePositionUm, -designY);
+                  runBlocked = false;
+                }
+                const distanceDownNm = Math.max(0, -designY * 1000);
+                const fovSection = Math.floor(distanceDownNm / 30000);
+                if (!fovStartStage.has(fovSection)) fovStartStage.set(fovSection, stagePositionUm);
+                const waferY = designY + stagePositionUm;
                 const waferX = (x - replayXCenter) / 1000;
-                if (waferX < -15 || waferX > 15 || waferY < -15 || waferY > 15) {
-                  stoppedFovSections.add(fovSection);
-                } else {
+                if (!runBlocked && (waferX < -15 || waferX > 15 || waferY < -15 || waferY > 15)) {
+                  runBlocked = true;
+                }
+                if (!runBlocked) {
                   completedShots++;
                 }
+                stagePositionUm += stageSpeedUmSec * dwell * 1e-9;
+                replayPreviousX = x;
+                replayPreviousY = y;
               }
               replayed += count;
               self.postMessage({type: "progress", processed: actualShots + replayed, total: actualShots * 2});
             }
+            fovSections.forEach(section => {
+              section.startStagePositionUm = fovStartStage.get(section.index) || 0;
+            });
             self.postMessage({
               type: "complete",
               result: {
                 version, expectedShots, actualShots, dataOffset, fileSize: passFile.size,
                 hasSidecar: Boolean(metaFile), blocks, subfields, slowestSubfield: slowest, fastestSubfield: fastest,
                 stageSpeedUmSec, minimumStageSpeedUmSec, maximumStageSpeedUmSec,
-                totalDwellNs: cumulativeDwellNs, firstY,
+                totalDwellNs: cumulativeDwellNs, firstY, downSign,
                 minX: minXAll, maxX: maxXAll, minY: minYAll, maxY: maxYAll,
                 sampleStride, shotSamples, subfieldHeightUm, completedShots, fovSections
               }
@@ -1793,37 +1809,41 @@ html>body{padding:0}</style>
         const buffer = await passFile.slice(startByte, startByte + recordCount * 8).arrayBuffer();
         if (token !== exactPassLoadToken) return;
         const view = new DataView(buffer);
-        let localDwellNs = 0;
+        const xCenter = (parsedPass.minX + parsedPass.maxX) / 2;
+        let stagePositionUm = section.startStagePositionUm;
+        const timelineStartStage = stagePositionUm;
+        let previousX = null, previousY = null;
+        let runBlocked = false;
         for (let i = 0; i < recordCount; i++) {
           const low = view.getUint32(i * 8, true);
           const y = view.getUint32(i * 8 + 4, true);
-          const fovSection = Math.floor(Math.abs(y - parsedPass.firstY) / 30000);
-          if (fovSection !== section.index) continue;
+          const x = (low >>> 16) & 0xFFFF;
           const dwell = (low >>> 2) & 0x3FFF;
-          localDwellNs += dwell;
-          exactPassShots.push({
-            index: section.firstShot + i,
-            x: (low >>> 16) & 0xFFFF,
-            y, dwell, localDwellNs
-          });
-        }
-        const xCenter = (parsedPass.minX + parsedPass.maxX) / 2;
-        const sectionTopDistanceNm = section.index * 30000;
-        let firstOutside = exactPassShots.length;
-        for (let i = 0; i < exactPassShots.length; i++) {
-          const shot = exactPassShots[i];
-          const designY = -(Math.abs(shot.y - parsedPass.firstY) - sectionTopDistanceNm) / 1000;
-          const stageTravel = parsedPass.stageSpeedUmSec * shot.localDwellNs * 1e-9;
-          const y = designY + stageTravel;
-          const x = (shot.x - xCenter) / 1000;
-          if (x < -15 || x > 15 || y < -15 || y > 15) {
-            firstOutside = i;
-            break;
+          const designY = (y - parsedPass.firstY) * parsedPass.downSign / 1000;
+          const isRunStart = previousY !== null &&
+            (Math.abs(x - previousX) >= 30000 || Math.abs(y - previousY) >= 30000);
+          if (isRunStart) {
+            stagePositionUm = Math.max(stagePositionUm, -designY);
+            runBlocked = false;
           }
+          const distanceDownNm = Math.max(0, -designY * 1000);
+          const fovSection = Math.floor(distanceDownNm / 30000);
+          const waferY = designY + stagePositionUm;
+          const waferX = (x - xCenter) / 1000;
+          if (!runBlocked && (waferX < -15 || waferX > 15 || waferY < -15 || waferY > 15)) runBlocked = true;
+          if (fovSection === section.index) {
+            exactPassShots.push({
+              index: section.firstShot + i, x, y, dwell, designY,
+              stagePositionUm, timelineNs: (stagePositionUm - timelineStartStage) / parsedPass.stageSpeedUmSec * 1e9,
+              exposable: !runBlocked
+            });
+          }
+          stagePositionUm += parsedPass.stageSpeedUmSec * dwell * 1e-9;
+          previousX = x;
+          previousY = y;
         }
-        exactSectionCompletedShots = firstOutside;
-        const lastCompletedDwell = firstOutside > 0 ? exactPassShots[firstOutside - 1].localDwellNs : 0;
-        passSimulationLimit = section.dwellNs ? lastCompletedDwell / section.dwellNs : 0;
+        exactSectionCompletedShots = exactPassShots.filter(shot => shot.exposable).length;
+        passSimulationLimit = 1;
         passSimulationPhase = 0;
         updatePassSimulation();
       }
@@ -1833,11 +1853,12 @@ html>body{padding:0}</style>
         if (!samples.length) return;
         const selectedIndex = Math.min(parsedPass.fovSections.length - 1, Math.max(0, n(passBlockSelect.value)));
         const selectedFovSection = parsedPass.fovSections[selectedIndex];
-        const elapsedDwellNs = selectedFovSection.dwellNs * passSimulationPhase;
+        const totalTimelineNs = samples.at(-1).timelineNs + samples.at(-1).dwell;
+        const elapsedDwellNs = totalTimelineNs * passSimulationPhase;
         let low = 0, high = samples.length;
         while (low < high) {
           const mid = (low + high) >> 1;
-          if (samples[mid].localDwellNs <= elapsedDwellNs) low = mid + 1;
+          if (samples[mid].timelineNs <= elapsedDwellNs) low = mid + 1;
           else high = mid;
         }
         const visibleCount = low;
@@ -1846,10 +1867,9 @@ html>body{padding:0}</style>
         const left = 42, top = 30, size = 286;
         const xCenter = (parsedPass.minX + parsedPass.maxX) / 2;
         const mapX = x => left + ((x - xCenter) / 1000 + 15) / 30 * size;
-        const sectionTopDistanceNm = selectedFovSection.index * 30000;
-        const currentStageTravel = parsedPass.stageSpeedUmSec * elapsedDwellNs * 1e-9;
-        const waferY = shot =>
-          -(Math.abs(shot.y - parsedPass.firstY) - sectionTopDistanceNm) / 1000 + currentStageTravel;
+        const currentStagePosition = selectedFovSection.startStagePositionUm + parsedPass.stageSpeedUmSec * elapsedDwellNs * 1e-9;
+        const currentStageTravel = currentStagePosition - selectedFovSection.startStagePositionUm;
+        const waferY = shot => shot.designY + currentStagePosition;
         const mapY = y => top + (15 - y) / 30 * size;
         const shotRadius = Math.max(0.9, (0.08 / 30 * size) / 2);
         let s = `<title>Whole pass shot-order simulation</title>`;
@@ -1869,7 +1889,7 @@ html>body{padding:0}</style>
           if (y < -15 || y > 15) continue;
           const x = mapX(shot.x);
           if (x < left || x > left + size) continue;
-          visibleShots.push({i, x, y, exposed: i < visibleCount});
+          visibleShots.push({i, x, y, exposed: i < visibleCount && shot.exposable});
         }
         const displayStride = Math.max(1, Math.ceil(visibleShots.length / 8000));
         for (let j = 0; j < visibleShots.length; j += displayStride) {
@@ -1878,11 +1898,12 @@ html>body{padding:0}</style>
         }
         const activeY = waferY(current);
         const activeX = mapX(current.x);
-        if (activeY >= -15 && activeY <= 15 && activeX >= left && activeX <= left + size) {
+        if (current.exposable && activeY >= -15 && activeY <= 15 && activeX >= left && activeX <= left + size) {
           s += `<circle cx="${activeX}" cy="${mapY(activeY)}" r="${Math.max(2, shotRadius + 1.4)}" fill="none" stroke="var(--viz-series-1)" stroke-width="1"></circle>`;
         }
         const selectedCompletion = exactPassShots.length ? exactSectionCompletedShots / exactPassShots.length : 0;
-        s += `<text class="svg-label" x="${left + 7}" y="${mapY(0) - 8}">${(visibleCount / exactPassShots.length * 100).toFixed(1)}% exposed · limit ${(selectedCompletion * 100).toFixed(1)}%</text>`;
+        const exposedSoFar = samples.slice(0, visibleCount).filter(shot => shot.exposable).length;
+        s += `<text class="svg-label" x="${left + 7}" y="${mapY(0) - 8}">${(exposedSoFar / exactPassShots.length * 100).toFixed(1)}% exposed · limit ${(selectedCompletion * 100).toFixed(1)}%</text>`;
         s += `<line class="stage-arrow" x1="${left + size + 15}" x2="${left + size + 15}" y1="${mapY(-4)}" y2="${mapY(5)}"></line>`;
         s += `<path class="stage-arrow" d="M ${left + size + 10} ${mapY(4)} L ${left + size + 15} ${mapY(5)} L ${left + size + 20} ${mapY(4)} Z"></path>`;
         s += `<text class="svg-label" x="${left + size + 15}" y="${top + 88}" text-anchor="middle">stage +Y</text>`;
