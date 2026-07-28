@@ -1144,17 +1144,17 @@ html>body{padding:0}</style>
     <h3 id="est-pass-heading">Load a pass file</h3>
     <div class="pass-controls">
       <label class="form-label">
-        Pass file
-        <input id="est-pass-file" class="form-control" type="file" accept=".pass,application/octet-stream">
+        Pass folder
+        <input id="est-pass-folder" class="form-control" type="file" webkitdirectory directory multiple>
       </label>
-      <label class="form-label">
-        Metadata sidecar <span class="text-muted">(optional)</span>
-        <input id="est-pass-meta" class="form-control" type="file" accept=".meta,.pass.meta,application/octet-stream">
+      <label id="est-pass-choice-label" class="form-label" hidden>
+        Detected pass file
+        <select id="est-pass-choice" class="form-select"></select>
       </label>
     </div>
     <div class="viz-row pass-actions">
       <button id="est-pass-scan" type="button" class="btn btn-primary" disabled>Scan pass file</button>
-      <span id="est-pass-status" class="text-small text-muted" aria-live="polite">Choose a .pass file to begin. Files are processed locally and are not uploaded.</span>
+      <span id="est-pass-status" class="text-small text-muted" aria-live="polite">Choose the folder containing your .pass file. Matching metadata is selected automatically and nothing is uploaded.</span>
     </div>
     <progress id="est-pass-progress" class="pass-progress" max="100" value="0" hidden aria-label="Pass file scan progress"></progress>
     <div id="est-pass-result" class="pass-result" hidden>
@@ -1267,8 +1267,9 @@ html>body{padding:0}</style>
       };
       const playButton = q("est-play");
       const restartButton = q("est-restart");
-      const passFileInput = q("est-pass-file");
-      const passMetaInput = q("est-pass-meta");
+      const passFolderInput = q("est-pass-folder");
+      const passChoiceLabel = q("est-pass-choice-label");
+      const passChoiceSelect = q("est-pass-choice");
       const passScanButton = q("est-pass-scan");
       const passStatus = q("est-pass-status");
       const passProgress = q("est-pass-progress");
@@ -1283,6 +1284,7 @@ html>body{padding:0}</style>
       let frameRequest = 0;
       let passWorker = null;
       let parsedPass = null;
+      let detectedPassFiles = [];
 
       function n(v) { return Number(v); }
       function fmt(v, digits = 3) {
@@ -1410,17 +1412,50 @@ html>body{padding:0}</style>
         URL.revokeObjectURL(workerUrl);
         return worker;
       }
+      function selectedPassPair() {
+        return detectedPassFiles[Number(passChoiceSelect.value) || 0] || {passFile: null, metaFile: null};
+      }
       function updatePassFileState() {
-        const passFile = passFileInput.files[0];
+        const {passFile, metaFile} = selectedPassPair();
         passScanButton.disabled = !passFile;
         passResult.hidden = true;
         parsedPass = null;
         if (!passFile) {
-          passStatus.textContent = "Choose a .pass file to begin. Files are processed locally and are not uploaded.";
+          passStatus.textContent = "Choose the folder containing your .pass file. Matching metadata is selected automatically and nothing is uploaded.";
           return;
         }
-        const metaFile = passMetaInput.files[0];
-        passStatus.textContent = `${passFile.name} · ${fmtBytes(passFile.size)}${metaFile ? ` · metadata: ${metaFile.name}` : " · no metadata sidecar selected"}`;
+        passStatus.textContent = `${passFile.name} · ${fmtBytes(passFile.size)}${metaFile ? ` · metadata automatically matched: ${metaFile.name}` : " · no matching metadata found; inline header will be used"}`;
+      }
+      function loadPassFolder() {
+        const files = Array.from(passFolderInput.files || []);
+        const byPath = new Map(files.map(file => [(file.webkitRelativePath || file.name).toLowerCase(), file]));
+        detectedPassFiles = files
+          .filter(file => file.name.toLowerCase().endsWith(".pass"))
+          .sort((a, b) => (a.webkitRelativePath || a.name).localeCompare(b.webkitRelativePath || b.name))
+          .map(passFile => {
+            const relativePath = passFile.webkitRelativePath || passFile.name;
+            const slash = relativePath.lastIndexOf("/");
+            const directory = slash >= 0 ? relativePath.slice(0, slash + 1) : "";
+            const baseName = passFile.name.slice(0, -5);
+            const candidates = [directory + passFile.name + ".meta", directory + baseName + ".meta"];
+            const metaFile = candidates.map(path => byPath.get(path.toLowerCase())).find(Boolean) || null;
+            return {passFile, metaFile, relativePath};
+          });
+        passChoiceSelect.innerHTML = "";
+        detectedPassFiles.forEach((entry, index) => {
+          const option = document.createElement("option");
+          option.value = String(index);
+          option.textContent = entry.relativePath + (entry.metaFile ? " (metadata matched)" : " (inline header)");
+          passChoiceSelect.appendChild(option);
+        });
+        passChoiceLabel.hidden = detectedPassFiles.length === 0;
+        if (!detectedPassFiles.length) {
+          passScanButton.disabled = true;
+          passResult.hidden = true;
+          passStatus.textContent = "No .pass files were found in that folder.";
+          return;
+        }
+        updatePassFileState();
       }
       function renderSelectedPassBlock() {
         if (!parsedPass) return;
@@ -1435,7 +1470,7 @@ html>body{padding:0}</style>
           `${fmt(block.shotCount, 0)} shots · ${block.kind} · X ${fmt(xSpan, 3)} µm × Y ${fmt(ySpan, 3)} µm · ${dwellText} · records ${fmt(block.startShot + 1, 0)}–${fmt(block.startShot + block.shotCount, 0)}`;
       }
       function scanPassFile() {
-        const passFile = passFileInput.files[0];
+        const {passFile, metaFile} = selectedPassPair();
         if (!passFile) return;
         if (passWorker) passWorker.terminate();
         passWorker = createPassWorker();
@@ -1487,7 +1522,7 @@ html>body{padding:0}</style>
           passWorker = null;
         };
         passStatus.className = "text-small text-muted";
-        passWorker.postMessage({passFile, metaFile: passMetaInput.files[0] || null});
+        passWorker.postMessage({passFile, metaFile});
       }
       function sectionState(start, end) {
         if (start > fovHalf) return "outside";
@@ -1737,8 +1772,8 @@ html>body{padding:0}</style>
         phase = 0;
         update(false);
       });
-      passFileInput.addEventListener("change", updatePassFileState);
-      passMetaInput.addEventListener("change", updatePassFileState);
+      passFolderInput.addEventListener("change", loadPassFolder);
+      passChoiceSelect.addEventListener("change", updatePassFileState);
       passScanButton.addEventListener("click", scanPassFile);
       passBlockSelect.addEventListener("change", renderSelectedPassBlock);
       update(true);
