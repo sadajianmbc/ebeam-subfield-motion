@@ -1530,27 +1530,61 @@ html>body{padding:0}</style>
                 previousY = y;
               }
               processed += count;
-              self.postMessage({type: "progress", processed, total: actualShots * 2});
+              self.postMessage({type: "progress", processed, total: actualShots * 3});
             }
             finishBlock(current);
             const subfields = Array.from(bandDwell, ([index, dwellNs]) => ({
               index, dwellNs, shotCount: bandShots.get(index) || 0,
               firstShot: bandFirstShot.get(index), lastShot: bandLastShot.get(index)
             })).sort((a, b) => a.index - b.index);
+            const bandWritePosition = new Map();
+            let orderedShotOffset = 0;
+            subfields.forEach(section => {
+              section.firstShot = orderedShotOffset;
+              section.lastShot = orderedShotOffset + section.shotCount - 1;
+              bandWritePosition.set(section.index, orderedShotOffset);
+              orderedShotOffset += section.shotCount;
+            });
             const slowest = subfields.reduce((best, item) => !best || item.dwellNs > best.dwellNs ? item : best, null);
             const fastest = subfields.reduce((best, item) => !best || item.dwellNs < best.dwellNs ? item : best, null);
             const fovSections = Array.from(fovDwell, ([index, dwellNs]) => ({
               index, dwellNs, shotCount: fovShots.get(index) || 0,
-              firstShot: fovFirstShot.get(index), lastShot: fovLastShot.get(index)
+              firstShot: null, lastShot: null
             })).sort((a, b) => a.index - b.index);
             const minimumStageSpeedUmSec = slowest ? subfieldHeightUm / (slowest.dwellNs * 1e-9) : 0;
             const maximumStageSpeedUmSec = fastest ? subfieldHeightUm / (fastest.dwellNs * 1e-9) : 0;
             const stageSpeedUmSec = minimumStageSpeedUmSec;
+            const reorderedRecords = new ArrayBuffer(actualShots * RECORD_SIZE);
+            const reorderedView = new DataView(reorderedRecords);
+            let reorderedSourceShots = 0;
+            while (reorderedSourceShots < actualShots) {
+              const count = Math.min(CHUNK_RECORDS, actualShots - reorderedSourceShots);
+              const startByte = dataOffset + reorderedSourceShots * RECORD_SIZE;
+              const buffer = await passFile.slice(startByte, startByte + count * RECORD_SIZE).arrayBuffer();
+              const view = new DataView(buffer);
+              for (let i = 0; i < count; i++) {
+                const low = view.getUint32(i * RECORD_SIZE, true);
+                const y = view.getUint32(i * RECORD_SIZE + 4, true);
+                const band = Math.floor(Math.abs(y - firstY) / Math.max(1, subfieldHeightUm * 1000));
+                const orderedIndex = bandWritePosition.get(band);
+                reorderedView.setUint32(orderedIndex * RECORD_SIZE, low, true);
+                reorderedView.setUint32(orderedIndex * RECORD_SIZE + 4, y, true);
+                bandWritePosition.set(band, orderedIndex + 1);
+              }
+              reorderedSourceShots += count;
+              self.postMessage({
+                type: "progress",
+                processed: actualShots + reorderedSourceShots,
+                total: actualShots * 3
+              });
+            }
             let completedShots = 0;
             let replayed = 0;
             const replayXCenter = (minXAll + maxXAll) / 2;
             const downSign = (maxYAll - firstY) >= (firstY - minYAll) ? -1 : 1;
             const fovStartStage = new Map();
+            const fovFirstOrderedShot = new Map();
+            const fovLastOrderedShot = new Map();
             const streamCheckpoints = [];
             let stagePositionUm = 0;
             let waitCount = 0;
@@ -1558,9 +1592,6 @@ html>body{padding:0}</style>
             let replayPreviousX = null, replayPreviousY = null;
             while (replayed < actualShots) {
               const count = Math.min(CHUNK_RECORDS, actualShots - replayed);
-              const startByte = dataOffset + replayed * RECORD_SIZE;
-              const buffer = await passFile.slice(startByte, startByte + count * RECORD_SIZE).arrayBuffer();
-              const view = new DataView(buffer);
               for (let i = 0; i < count; i++) {
                 const replayIndex = replayed + i;
                 if (replayIndex % 100000 === 0) {
@@ -1569,17 +1600,17 @@ html>body{padding:0}</style>
                     previousX: replayPreviousX, previousY: replayPreviousY
                   });
                 }
-                const low = view.getUint32(i * RECORD_SIZE, true);
-                const y = view.getUint32(i * RECORD_SIZE + 4, true);
+                const low = reorderedView.getUint32(replayIndex * RECORD_SIZE, true);
+                const y = reorderedView.getUint32(replayIndex * RECORD_SIZE + 4, true);
                 const x = (low >>> 16) & 0xFFFF;
                 const dwell = (low >>> 2) & 0x3FFF;
                 const designY = (y - firstY) * downSign / 1000;
                 const isRunStart = replayPreviousY === null ||
                   Math.abs(y - replayPreviousY) > RUN_GAP_Y_NM;
                 const projectedY = designY + stagePositionUm;
-                if (isRunStart || Math.abs(projectedY) > 15) {
+                if ((isRunStart || projectedY < -15) && projectedY < 0) {
                   const targetStagePositionUm = -designY;
-                  const repositionDistanceUm = Math.abs(targetStagePositionUm - stagePositionUm);
+                  const repositionDistanceUm = targetStagePositionUm - stagePositionUm;
                   if (repositionDistanceUm > Number.EPSILON) {
                     stagePositionUm = targetStagePositionUm;
                     waitCount++;
@@ -1589,6 +1620,8 @@ html>body{padding:0}</style>
                 const distanceDownNm = Math.max(0, -designY * 1000);
                 const fovSection = Math.floor(distanceDownNm / 30000);
                 if (!fovStartStage.has(fovSection)) fovStartStage.set(fovSection, stagePositionUm);
+                if (!fovFirstOrderedShot.has(fovSection)) fovFirstOrderedShot.set(fovSection, replayIndex);
+                fovLastOrderedShot.set(fovSection, replayIndex);
                 const waferY = designY + stagePositionUm;
                 const waferX = (x - replayXCenter) / 1000;
                 if (waferX >= -15 && waferX <= 15 && waferY >= -15 && waferY <= 15) {
@@ -1599,10 +1632,12 @@ html>body{padding:0}</style>
                 replayPreviousY = y;
               }
               replayed += count;
-              self.postMessage({type: "progress", processed: actualShots + replayed, total: actualShots * 2});
+              self.postMessage({type: "progress", processed: actualShots * 2 + replayed, total: actualShots * 3});
             }
             fovSections.forEach(section => {
               section.startStagePositionUm = fovStartStage.get(section.index) || 0;
+              section.firstShot = fovFirstOrderedShot.get(section.index);
+              section.lastShot = fovLastOrderedShot.get(section.index);
             });
             self.postMessage({
               type: "complete",
@@ -1613,9 +1648,9 @@ html>body{padding:0}</style>
                 totalDwellNs: cumulativeDwellNs, firstY, downSign,
                 minX: minXAll, maxX: maxXAll, minY: minYAll, maxY: maxYAll,
                 sampleStride, shotSamples, subfieldHeightUm, completedShots,
-                waitCount, totalWaitSec, fovSections, streamCheckpoints
+                waitCount, totalWaitSec, fovSections, streamCheckpoints, reorderedRecords
               }
-            });
+            }, [reorderedRecords]);
           } catch (error) {
             self.postMessage({type: "error", message: error instanceof Error ? error.message : String(error)});
           }
@@ -1674,7 +1709,7 @@ html>body{padding:0}</style>
           if (message.type === "progress") {
             const percent = message.total ? message.processed / message.total * 100 : 0;
             passProgress.value = percent;
-            passStatus.textContent = `Scanning locally… ${percent.toFixed(1)}% · ${fmt(message.processed, 0)} of ${fmt(message.total, 0)} shots`;
+            passStatus.textContent = `Scanning locally… ${percent.toFixed(1)}% · organizing shots by subfield height`;
           } else if (message.type === "complete") {
             parsedPass = message.result;
             passProgress.value = 100;
@@ -1821,11 +1856,12 @@ html>body{padding:0}</style>
         const checkpoint = parsedPass.streamCheckpoints.find(item => item.shotIndex === chunkStart);
         if (!checkpoint) throw new Error(`Missing stream checkpoint at shot ${chunkStart + 1}.`);
         const count = Math.min(passChunkSize, parsedPass.actualShots - chunkStart);
-        const buffer = await passFile.slice(
-          parsedPass.dataOffset + chunkStart * 8,
-          parsedPass.dataOffset + (chunkStart + count) * 8
-        ).arrayBuffer();
-        const view = new DataView(buffer);
+        const view = parsedPass.reorderedRecords
+          ? new DataView(parsedPass.reorderedRecords, chunkStart * 8, count * 8)
+          : new DataView(await passFile.slice(
+              parsedPass.dataOffset + chunkStart * 8,
+              parsedPass.dataOffset + (chunkStart + count) * 8
+            ).arrayBuffer());
         const xCenter = (parsedPass.minX + parsedPass.maxX) / 2;
         let stagePositionUm = checkpoint.stagePositionUm;
         let previousX = checkpoint.previousX, previousY = checkpoint.previousY;
@@ -1841,9 +1877,9 @@ html>body{padding:0}</style>
           const waitStartStagePositionUm = stagePositionUm;
           const projectedY = designY + stagePositionUm;
           let waitBeforeSec = 0;
-          if (isRunStart || Math.abs(projectedY) > fovHalf) {
+          if ((isRunStart || projectedY < -fovHalf) && projectedY < 0) {
             const targetStagePositionUm = -designY;
-            const repositionDistanceUm = Math.abs(targetStagePositionUm - stagePositionUm);
+            const repositionDistanceUm = targetStagePositionUm - stagePositionUm;
             if (repositionDistanceUm > Number.EPSILON) {
               waitBeforeSec = repositionDistanceUm / parsedPass.stageSpeedUmSec;
               stagePositionUm = targetStagePositionUm;
