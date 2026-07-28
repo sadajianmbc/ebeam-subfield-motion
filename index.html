@@ -1371,6 +1371,8 @@ html>body{padding:0}</style>
       let passSimulationPlaying = false;
       let passSimulationFrame = 0;
       let passSimulationLastTime = 0;
+      let exactPassShots = [];
+      let exactPassLoadToken = 0;
 
       function n(v) { return Number(v); }
       function fmt(v, digits = 3) {
@@ -1431,6 +1433,8 @@ html>body{padding:0}</style>
             let cumulativeDwellNs = 0;
             const bandDwell = new Map();
             const bandShots = new Map();
+            const bandFirstShot = new Map();
+            const bandLastShot = new Map();
             const sampleStride = Math.max(1, Math.ceil(actualShots / 50000));
             const shotSamples = [];
 
@@ -1472,6 +1476,8 @@ html>body{padding:0}</style>
                 const band = Math.floor(Math.abs(y - firstY) / Math.max(1, subfieldHeightUm * 1000));
                 bandDwell.set(band, (bandDwell.get(band) || 0) + dwell);
                 bandShots.set(band, (bandShots.get(band) || 0) + 1);
+                if (!bandFirstShot.has(band)) bandFirstShot.set(band, globalIndex);
+                bandLastShot.set(band, globalIndex);
                 if (globalIndex % sampleStride === 0 || globalIndex === actualShots - 1) {
                   shotSamples.push({index: globalIndex, x, y, dwell, cumulativeDwellNs});
                 }
@@ -1500,7 +1506,8 @@ html>body{padding:0}</style>
             }
             finishBlock(current);
             const subfields = Array.from(bandDwell, ([index, dwellNs]) => ({
-              index, dwellNs, shotCount: bandShots.get(index) || 0
+              index, dwellNs, shotCount: bandShots.get(index) || 0,
+              firstShot: bandFirstShot.get(index), lastShot: bandLastShot.get(index)
             })).sort((a, b) => a.index - b.index);
             const slowest = subfields.reduce((best, item) => !best || item.dwellNs > best.dwellNs ? item : best, null);
             const stageSpeedUmSec = slowest ? subfieldHeightUm / (slowest.dwellNs * 1e-9) : 0;
@@ -1556,6 +1563,7 @@ html>body{padding:0}</style>
         passScanButton.disabled = !passFile;
         passResult.hidden = true;
         parsedPass = null;
+        exactPassShots = [];
         stopPassSimulation();
         renderPassSkeleton(passFile ? "Ready to scan selected pass file" : undefined);
         if (!passFile) {
@@ -1619,7 +1627,7 @@ html>body{padding:0}</style>
             passStepInput.value = "1";
             q("est-pass-step-val").textContent = `1 of ${parsedPass.subfields.length}`;
             passSimulationPhase = 0;
-            updatePassSimulation();
+            loadExactPassSubfield();
             passWorker.terminate();
             passWorker = null;
           } else if (message.type === "error") {
@@ -1722,16 +1730,51 @@ html>body{padding:0}</style>
         s += `<text class="svg-muted" x="${left + width / 2}" y="${top + height + 44}" text-anchor="middle">Subfield number</text>`;
         svg.innerHTML = s;
       }
+      async function loadExactPassSubfield() {
+        if (!parsedPass) return;
+        const token = ++exactPassLoadToken;
+        const selectedIndex = Math.min(parsedPass.subfields.length - 1, Math.max(0, n(passStepInput.value) - 1));
+        const section = parsedPass.subfields[selectedIndex];
+        const {passFile} = selectedPassPair();
+        if (!passFile || !section) return;
+        stopPassSimulation();
+        exactPassShots = [];
+        q("est-pass-detail").textContent = `Loading every shot in subfield ${selectedIndex + 1}…`;
+        const recordCount = section.lastShot - section.firstShot + 1;
+        const startByte = parsedPass.dataOffset + section.firstShot * 8;
+        const buffer = await passFile.slice(startByte, startByte + recordCount * 8).arrayBuffer();
+        if (token !== exactPassLoadToken) return;
+        const view = new DataView(buffer);
+        let localDwellNs = 0;
+        for (let i = 0; i < recordCount; i++) {
+          const low = view.getUint32(i * 8, true);
+          const y = view.getUint32(i * 8 + 4, true);
+          const band = Math.floor(Math.abs(y - parsedPass.firstY) / Math.max(1, parsedPass.subfieldHeightUm * 1000));
+          if (band !== section.index) continue;
+          const dwell = (low >>> 2) & 0x3FFF;
+          localDwellNs += dwell;
+          exactPassShots.push({
+            index: section.firstShot + i,
+            x: (low >>> 16) & 0xFFFF,
+            y, dwell, localDwellNs
+          });
+        }
+        passSimulationPhase = 0;
+        updatePassSimulation();
+      }
       function updatePassSimulation() {
         if (!parsedPass) return;
-        const samples = parsedPass.shotSamples;
+        const samples = exactPassShots;
+        if (!samples.length) return;
         const visibleCount = Math.max(1, Math.floor(samples.length * passSimulationPhase));
         const current = samples[Math.min(samples.length - 1, visibleCount - 1)];
         const svg = q("est-pass-fov");
         const left = 42, top = 30, size = 286;
         const xCenter = (parsedPass.minX + parsedPass.maxX) / 2;
         const mapX = x => left + ((x - xCenter) / 1000 + 15) / 30 * size;
-        const currentStageTravel = parsedPass.stageSpeedUmSec * current.cumulativeDwellNs * 1e-9;
+        const selectedIndex = Math.min(parsedPass.subfields.length - 1, Math.max(0, n(passStepInput.value) - 1));
+        const priorDwellNs = parsedPass.subfields.slice(0, selectedIndex).reduce((sum, item) => sum + item.dwellNs, 0);
+        const currentStageTravel = parsedPass.stageSpeedUmSec * (priorDwellNs + current.localDwellNs) * 1e-9;
         const waferY = shot => -Math.abs(shot.y - parsedPass.firstY) / 1000 + currentStageTravel;
         const mapY = y => top + (15 - y) / 30 * size;
         const shotRadius = Math.max(0.55, (0.08 / 30 * size) / 2);
@@ -2099,7 +2142,7 @@ html>body{padding:0}</style>
         const value = Math.min(parsedPass.subfields.length, Math.max(1, n(passStepInput.value)));
         passStepInput.value = String(value);
         q("est-pass-step-val").textContent = `${value} of ${parsedPass.subfields.length}`;
-        drawPassPositionPlot();
+        loadExactPassSubfield();
       });
       update(true);
       renderPassSkeleton();
