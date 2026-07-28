@@ -1166,8 +1166,12 @@ html>body{padding:0}</style>
     <h3 id="est-pass-heading">Load a pass file</h3>
     <div class="pass-controls">
       <label class="form-label">
-        Pass file and matching metadata
-        <input id="est-pass-file" class="form-control" type="file" multiple accept=".pass,.meta,.pass.meta,application/octet-stream">
+        Pass file
+        <input id="est-pass-file" class="form-control" type="file" accept=".pass,application/octet-stream">
+      </label>
+      <label class="form-label">
+        Matching metadata
+        <input id="est-pass-meta" class="form-control" type="file" accept=".meta,.pass.meta,application/octet-stream">
       </label>
       <label class="form-label">
         Subfield height (µm)
@@ -1176,7 +1180,7 @@ html>body{padding:0}</style>
     </div>
     <div class="viz-row pass-actions">
       <button id="est-pass-scan" type="button" class="btn btn-primary" disabled>Scan pass file</button>
-      <span id="est-pass-status" class="text-small text-muted" aria-live="polite">Select the .pass and matching .pass.meta together. They are paired automatically and processed locally.</span>
+      <span id="est-pass-status" class="text-small text-muted" aria-live="polite">Choose one .pass file and its matching .pass.meta. Both are processed locally.</span>
     </div>
     <progress id="est-pass-progress" class="pass-progress" max="100" value="0" hidden aria-label="Pass file scan progress"></progress>
     <div id="est-pass-result" class="pass-result" hidden>
@@ -1350,6 +1354,7 @@ html>body{padding:0}</style>
       const playButton = q("est-play");
       const restartButton = q("est-restart");
       const passFileInput = q("est-pass-file");
+      const passMetaInput = q("est-pass-meta");
       const passPanel = q("est-pass-panel");
       const manualSimulator = q("est-manual-simulator");
       const manualModeButton = q("est-mode-manual");
@@ -1560,10 +1565,9 @@ html>body{padding:0}</style>
         return worker;
       }
       function selectedPassPair() {
-        const files = Array.from(passFileInput.files || []);
         return {
-          passFile: files.find(file => file.name.toLowerCase().endsWith(".pass")) || null,
-          metaFile: files.find(file => file.name.toLowerCase().endsWith(".pass.meta") || file.name.toLowerCase().endsWith(".meta")) || null
+          passFile: passFileInput.files[0] || null,
+          metaFile: passMetaInput.files[0] || null
         };
       }
       function updatePassFileState() {
@@ -1575,7 +1579,7 @@ html>body{padding:0}</style>
         stopPassSimulation();
         renderPassSkeleton(passFile ? "Ready to scan selected pass file" : undefined);
         if (!passFile) {
-          passStatus.textContent = "Select the .pass and matching .pass.meta together. They are paired automatically and processed locally.";
+          passStatus.textContent = "Choose one .pass file and its matching .pass.meta. Both are processed locally.";
           return;
         }
         passStatus.textContent = `${passFile.name} · ${fmtBytes(passFile.size)}${metaFile ? ` · metadata: ${metaFile.name}` : " · using inline header"}`;
@@ -2151,6 +2155,7 @@ html>body{padding:0}</style>
       manualModeButton.addEventListener("click", () => setSimulatorMode("manual"));
       passModeButton.addEventListener("click", () => setSimulatorMode("pass"));
       passFileInput.addEventListener("change", updatePassFileState);
+      passMetaInput.addEventListener("change", updatePassFileState);
       passHeightInput.addEventListener("change", () => {
         if (parsedPass) {
           parsedPass = null;
