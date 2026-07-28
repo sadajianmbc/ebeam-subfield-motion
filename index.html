@@ -1033,6 +1033,14 @@ html>body{padding:0}</style>
       margin: 0 0 6px;
       font-weight: 500;
     }
+    #ebeam-subfield-tracker .beam-closeup {
+      margin-top: 12px;
+      padding: 10px 12px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: var(--secondary);
+    }
+    #ebeam-subfield-tracker .beam-closeup .panel-label { margin-bottom: 2px; }
     #ebeam-subfield-tracker svg {
       display: block;
       width: 100%;
@@ -1205,6 +1213,10 @@ html>body{padding:0}</style>
         <section>
           <p class="panel-label">Selected subfield in the moving 30 × 30 µm FOV</p>
           <svg id="est-pass-fov" viewBox="0 0 360 400" role="img" aria-label="Pass-file shots moving through the fixed field of view"></svg>
+          <div class="beam-closeup">
+            <p class="panel-label">Beam close-up</p>
+            <svg id="est-pass-zoom" viewBox="0 0 336 150" role="img" aria-label="Magnified view centered on the shot currently being exposed"></svg>
+          </div>
         </section>
         <section>
           <p class="panel-label">Accumulated subfield position</p>
@@ -1679,6 +1691,13 @@ html>body{padding:0}</style>
         s += `<text class="svg-label" x="${left + size + 15}" y="${top + 88}" text-anchor="middle">stage +Y</text>`;
         s += `<text class="svg-muted" x="${left + size / 2}" y="${top + size + 24}" text-anchor="middle">30 × 30 µm fixed E-beam FOV</text>`;
         svg.innerHTML = s;
+        q("est-pass-zoom").innerHTML =
+          `<title>Beam close-up preview</title>` +
+          `<rect class="safe-band" x="93" y="8" width="150" height="126"></rect>` +
+          `<line class="centerline" x1="168" x2="168" y1="8" y2="134"></line>` +
+          `<line class="centerline" x1="93" x2="243" y1="71" y2="71"></line>` +
+          `<circle cx="168" cy="71" r="6" fill="none" stroke="var(--viz-series-1)" stroke-width="1.5"></circle>` +
+          `<text class="svg-muted" x="168" y="148" text-anchor="middle">1 × 1 µm view · active shot centered</text>`;
         const plot = q("est-pass-plot");
         let p = `<title>Accumulated subfield position preview</title>`;
         const pl = 52, pt = 28, pw = 438, ph = 316;
@@ -1811,6 +1830,26 @@ html>body{padding:0}</style>
         s += `<text class="svg-label" x="${left + size + 15}" y="${top + 88}" text-anchor="middle">stage +Y</text>`;
         s += `<text class="svg-muted" x="${left + size / 2}" y="${top + size + 24}" text-anchor="middle">80 nm shot diameter · shot ${(current.index + 1).toLocaleString()} · dwell ${current.dwell} ns</text>`;
         svg.innerHTML = s;
+        const zoomSvg = q("est-pass-zoom");
+        const zoomLeft = 93, zoomTop = 8, zoomSize = 126, zoomCenterX = zoomLeft + zoomSize / 2, zoomCenterY = zoomTop + zoomSize / 2;
+        const zoomMapX = dx => zoomCenterX + dx * zoomSize;
+        const zoomMapY = dy => zoomCenterY - dy * zoomSize;
+        const zoomShotRadius = 0.08 * zoomSize / 2;
+        let z = `<title>Beam close-up at encoded shot ${(current.index + 1).toLocaleString()}</title>`;
+        z += `<desc>One micrometer square view centered on the active shot. All dots have an eighty nanometer diameter.</desc>`;
+        z += `<rect class="safe-band" x="${zoomLeft}" y="${zoomTop}" width="${zoomSize}" height="${zoomSize}"></rect>`;
+        for (const dot of visibleShots) {
+          const shot = samples[dot.i];
+          const dx = (shot.x - current.x) / 1000;
+          const dy = waferY(shot) - activeY;
+          if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) continue;
+          z += `<circle class="shot-dot" cx="${zoomMapX(dx)}" cy="${zoomMapY(dy)}" r="${zoomShotRadius}" opacity="0.86"></circle>`;
+        }
+        z += `<line class="centerline" x1="${zoomCenterX}" x2="${zoomCenterX}" y1="${zoomTop}" y2="${zoomTop + zoomSize}"></line>`;
+        z += `<line class="centerline" x1="${zoomLeft}" x2="${zoomLeft + zoomSize}" y1="${zoomCenterY}" y2="${zoomCenterY}"></line>`;
+        z += `<circle cx="${zoomCenterX}" cy="${zoomCenterY}" r="${zoomShotRadius + 3}" fill="none" stroke="var(--viz-series-1)" stroke-width="1.5"></circle>`;
+        z += `<text class="svg-muted" x="${zoomCenterX}" y="148" text-anchor="middle">1 × 1 µm · 80 nm dots · active shot centered</text>`;
+        zoomSvg.innerHTML = z;
         drawPassPositionPlot();
         const completion = parsedPass.completedShots / parsedPass.actualShots;
         const fastestSubfield = parsedPass.subfields.reduce(
