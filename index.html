@@ -1744,7 +1744,6 @@ html>body{padding:0}</style>
         s += `<path class="stage-arrow" d="M ${x0 + size + 10} ${yMap(4)} L ${x0 + size + 15} ${yMap(5)} L ${x0 + size + 20} ${yMap(4)} Z"></path>`;
         s += `<text class="svg-label" x="${x0 + size + 15}" y="${yMap(6.5)}" text-anchor="middle">stage +Y</text>`;
         s += `<text class="svg-muted" x="${x0 + size / 2}" y="${y0 + size + 23}" text-anchor="middle">Generated X width ${fmt(m.patternWidthUm, 3)} µm · ${m.lineCount} lines</text>`;
-        s += `<text class="svg-muted" x="${x0 + size / 2}" y="${y0 + size + 43}" text-anchor="middle">Center span ${fmt(m.centerSpanUm, 3)} µm · ${fmt(m.pitch, 3)} nm pitch</text>`;
         svg.innerHTML = s;
       }
 
