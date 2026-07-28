@@ -1532,11 +1532,14 @@ html>body{padding:0}</style>
               firstShot: bandFirstShot.get(index), lastShot: bandLastShot.get(index)
             })).sort((a, b) => a.index - b.index);
             const slowest = subfields.reduce((best, item) => !best || item.dwellNs > best.dwellNs ? item : best, null);
+            const fastest = subfields.reduce((best, item) => !best || item.dwellNs < best.dwellNs ? item : best, null);
             const fovSections = Array.from(fovDwell, ([index, dwellNs]) => ({
               index, dwellNs, shotCount: fovShots.get(index) || 0,
               firstShot: fovFirstShot.get(index), lastShot: fovLastShot.get(index)
             })).sort((a, b) => a.index - b.index);
-            const stageSpeedUmSec = slowest ? subfieldHeightUm / (slowest.dwellNs * 1e-9) : 0;
+            const minimumStageSpeedUmSec = slowest ? subfieldHeightUm / (slowest.dwellNs * 1e-9) : 0;
+            const maximumStageSpeedUmSec = fastest ? subfieldHeightUm / (fastest.dwellNs * 1e-9) : 0;
+            const stageSpeedUmSec = maximumStageSpeedUmSec;
             let completedShots = 0;
             let replayed = 0;
             let replayDwellNs = 0;
@@ -1560,8 +1563,9 @@ html>body{padding:0}</style>
               type: "complete",
               result: {
                 version, expectedShots, actualShots, dataOffset, fileSize: passFile.size,
-                hasSidecar: Boolean(metaFile), blocks, subfields, slowestSubfield: slowest,
-                stageSpeedUmSec, totalDwellNs: cumulativeDwellNs, firstY,
+                hasSidecar: Boolean(metaFile), blocks, subfields, slowestSubfield: slowest, fastestSubfield: fastest,
+                stageSpeedUmSec, minimumStageSpeedUmSec, maximumStageSpeedUmSec,
+                totalDwellNs: cumulativeDwellNs, firstY,
                 minX: minXAll, maxX: maxXAll, minY: minYAll, maxY: maxYAll,
                 sampleStride, shotSamples, subfieldHeightUm, completedShots, fovSections
               }
@@ -1879,19 +1883,13 @@ html>body{padding:0}</style>
         zoomSvg.innerHTML = z;
         drawPassPositionPlot();
         const completion = parsedPass.completedShots / parsedPass.actualShots;
-        const fastestSubfield = parsedPass.subfields.reduce(
-          (best, item) => !best || item.dwellNs < best.dwellNs ? item : best,
-          null
-        );
-        const maximumSpeedUmSec = fastestSubfield
-          ? parsedPass.subfieldHeightUm / (fastestSubfield.dwellNs * 1e-9)
-          : 0;
-        q("est-pass-max-speed").textContent = `${fmt(maximumSpeedUmSec / 1000, 6)} mm/s`;
+        const fastestSubfield = parsedPass.fastestSubfield;
+        q("est-pass-max-speed").textContent = `${fmt(parsedPass.maximumStageSpeedUmSec / 1000, 6)} mm/s`;
         q("est-pass-max-speed-context").textContent =
-          `Subfield ${fastestSubfield.index + 1} · ${fmt(fastestSubfield.shotCount, 0)} shots`;
-        q("est-pass-speed").textContent = `${fmt(parsedPass.stageSpeedUmSec / 1000, 6)} mm/s`;
+          `Used for the entire pass · set by subfield ${fastestSubfield.index + 1}`;
+        q("est-pass-speed").textContent = `${fmt(parsedPass.minimumStageSpeedUmSec / 1000, 6)} mm/s`;
         q("est-pass-speed-context").textContent =
-          `Used for the entire pass · set by subfield ${parsedPass.slowestSubfield.index + 1}`;
+          `Comparison only · set by subfield ${parsedPass.slowestSubfield.index + 1}`;
         q("est-pass-shots").textContent = fmt(parsedPass.actualShots, 0);
         q("est-pass-shots-context").textContent =
           `${parsedPass.subfields.length} subfield-height sections analyzed`;
