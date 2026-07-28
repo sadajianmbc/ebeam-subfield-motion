@@ -1796,16 +1796,23 @@ html>body{padding:0}</style>
         if (!parsedPass) return;
         const samples = exactPassShots;
         if (!samples.length) return;
-        const visibleCount = Math.max(1, Math.floor(samples.length * passSimulationPhase));
-        const current = samples[Math.min(samples.length - 1, visibleCount - 1)];
+        const selectedIndex = Math.min(parsedPass.fovSections.length - 1, Math.max(0, n(passBlockSelect.value)));
+        const selectedFovSection = parsedPass.fovSections[selectedIndex];
+        const elapsedDwellNs = selectedFovSection.dwellNs * passSimulationPhase;
+        let low = 0, high = samples.length;
+        while (low < high) {
+          const mid = (low + high) >> 1;
+          if (samples[mid].localDwellNs <= elapsedDwellNs) low = mid + 1;
+          else high = mid;
+        }
+        const visibleCount = low;
+        const current = samples[Math.min(samples.length - 1, Math.max(0, visibleCount - 1))];
         const svg = q("est-pass-fov");
         const left = 42, top = 30, size = 286;
         const xCenter = (parsedPass.minX + parsedPass.maxX) / 2;
         const mapX = x => left + ((x - xCenter) / 1000 + 15) / 30 * size;
-        const selectedIndex = Math.min(parsedPass.fovSections.length - 1, Math.max(0, n(passBlockSelect.value)));
-        const selectedFovSection = parsedPass.fovSections[selectedIndex];
         const sectionTopDistanceNm = selectedFovSection.index * 30000;
-        const currentStageTravel = parsedPass.stageSpeedUmSec * current.localDwellNs * 1e-9;
+        const currentStageTravel = parsedPass.stageSpeedUmSec * elapsedDwellNs * 1e-9;
         const waferY = shot =>
           -(Math.abs(shot.y - parsedPass.firstY) - sectionTopDistanceNm) / 1000 + currentStageTravel;
         const mapY = y => top + (15 - y) / 30 * size;
@@ -1843,7 +1850,7 @@ html>body{padding:0}</style>
         s += `<line class="stage-arrow" x1="${left + size + 15}" x2="${left + size + 15}" y1="${mapY(-4)}" y2="${mapY(5)}"></line>`;
         s += `<path class="stage-arrow" d="M ${left + size + 10} ${mapY(4)} L ${left + size + 15} ${mapY(5)} L ${left + size + 20} ${mapY(4)} Z"></path>`;
         s += `<text class="svg-label" x="${left + size + 15}" y="${top + 88}" text-anchor="middle">stage +Y</text>`;
-        s += `<text class="svg-muted" x="${left + size / 2}" y="${top + size + 24}" text-anchor="middle">Blue exposed · gray pending · shot ${(current.index + 1).toLocaleString()}</text>`;
+        s += `<text class="svg-muted" x="${left + size / 2}" y="${top + size + 24}" text-anchor="middle">Blue exposed · gray pending · stage +${fmt(currentStageTravel, 3)} µm</text>`;
         svg.innerHTML = s;
         const zoomSvg = q("est-pass-zoom");
         const zoomLeft = 93, zoomTop = 8, zoomSize = 126, zoomCenterX = zoomLeft + zoomSize / 2, zoomCenterY = zoomTop + zoomSize / 2;
@@ -1888,7 +1895,8 @@ html>body{padding:0}</style>
           `${fmt(parsedPass.completedShots, 0)} of ${fmt(parsedPass.actualShots, 0)} total shots completed`;
         q("est-pass-detail").textContent =
           `Shot ${(current.index + 1).toLocaleString()} of ${parsedPass.actualShots.toLocaleString()} · ` +
-          `X ${(current.x / 1000).toFixed(3)} µm · Y ${(current.y / 1000).toFixed(3)} µm · ${current.dwell} ns dwell.`;
+          `X ${(current.x / 1000).toFixed(3)} µm · Y ${(current.y / 1000).toFixed(3)} µm · ${current.dwell} ns dwell · ` +
+          `stage travel ${fmt(currentStageTravel, 3)} µm.`;
       }
       function stopPassSimulation() {
         passSimulationPlaying = false;
