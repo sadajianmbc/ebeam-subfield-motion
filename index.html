@@ -1544,7 +1544,7 @@ html>body{padding:0}</style>
         const yMap = y => y0 + (fovHalf - y) / (2 * fovHalf) * size;
         const xMap = x => x0 + (x + fovHalf) / (2 * fovHalf) * size;
         const linesToDraw = Math.min(m.lineCount, 72);
-        const stageShift = selected.travel * progress;
+        const stageShift = selected.start + selected.travel * progress;
         const lineTop = stageShift;
         const lineBottom = lineTop - selected.actualHeight;
         let s = `<title>Subfield ${selected.i + 1} in the moving field of view</title>`;
@@ -1616,6 +1616,11 @@ html>body{padding:0}</style>
         q("est-play-label").textContent = "Play motion";
       }
 
+      function completionLimit(section) {
+        if (section.state === "safe") return 1;
+        return Math.max(0, Math.min(1, (fovHalf - section.start) / Math.max(Number.EPSILON, section.travel)));
+      }
+
       function update(resetStep = false) {
         const m = model();
         if (resetStep) {
@@ -1660,10 +1665,28 @@ html>body{padding:0}</style>
         const pace = n(controls.pace.value);
         phase += elapsed * pace;
         let selectedIndex = Math.max(0, n(controls.step.value) - 1);
+        let selected = m.sections[selectedIndex];
+        let limit = completionLimit(selected);
+        if (phase >= limit && limit < 1) {
+          phase = limit;
+          update(false);
+          stopMotion();
+          q("est-play-label").textContent = "Replay motion";
+          return;
+        }
         while (phase >= 1 && selectedIndex < m.sections.length - 1) {
           phase -= 1;
           selectedIndex += 1;
           controls.step.value = String(selectedIndex + 1);
+          selected = m.sections[selectedIndex];
+          limit = completionLimit(selected);
+          if (phase >= limit && limit < 1) {
+            phase = limit;
+            update(false);
+            stopMotion();
+            q("est-play-label").textContent = "Replay motion";
+            return;
+          }
         }
         if (phase >= 1 && selectedIndex >= m.sections.length - 1) {
           phase = 1;
@@ -1679,7 +1702,8 @@ html>body{padding:0}</style>
       function startMotion() {
         const m = model();
         const selectedIndex = Math.max(0, n(controls.step.value) - 1);
-        if (selectedIndex >= m.sections.length - 1 && phase >= 1) {
+        const selectedLimit = completionLimit(m.sections[selectedIndex]);
+        if ((selectedIndex >= m.sections.length - 1 && phase >= 1) || phase >= selectedLimit) {
           controls.step.value = "1";
           phase = 0;
         }
