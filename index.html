@@ -1205,11 +1205,36 @@ html>body{padding:0}</style>
           <div id="est-pass-completion-context" class="text-small text-muted"></div>
         </div>
       </div>
-      <svg id="est-pass-fov" viewBox="0 0 620 360" role="img" aria-label="Pass-file shots moving through the fixed field of view"></svg>
-      <div class="motion-actions">
-        <button id="est-pass-play" type="button" class="btn btn-primary" disabled>Play pass simulation</button>
-        <button id="est-pass-restart" type="button" class="btn" disabled>Restart</button>
+      <div class="visual-grid">
+        <section>
+          <p class="panel-label">Selected subfield in the moving 30 × 30 µm FOV</p>
+          <svg id="est-pass-fov" viewBox="0 0 360 400" role="img" aria-label="Pass-file shots moving through the fixed field of view"></svg>
+        </section>
+        <section>
+          <p class="panel-label">Accumulated subfield position</p>
+          <svg id="est-pass-plot" viewBox="0 0 520 400" role="img" aria-label="Pass-file subfield positions relative to the field of view"></svg>
+          <div class="legend text-small">
+            <span class="legend-item"><span class="swatch safe"></span>Fully inside</span>
+            <span class="legend-item"><span class="swatch partial"></span>Crosses edge</span>
+            <span class="legend-item"><span class="swatch outside"></span>Outside</span>
+          </div>
+        </section>
       </div>
+      <div class="viz-row motion-row">
+        <div class="motion-actions">
+          <button id="est-pass-play" type="button" class="btn btn-primary" disabled>Play pass simulation</button>
+          <button id="est-pass-restart" type="button" class="btn" disabled>Restart</button>
+        </div>
+        <label class="form-label">
+          Animation pace
+          <input id="est-pass-pace" class="form-control" type="number" min="0.1" max="100" step="0.1" value="1">
+        </label>
+      </div>
+      <label class="form-label step-row">
+        <span class="control-head"><span>Selected subfield</span><span id="est-pass-step-val">—</span></span>
+        <input id="est-pass-step" class="form-control" type="number" min="1" max="1" step="1" value="1" disabled>
+      </label>
+      <div id="est-pass-detail" class="text-small text-muted" aria-live="polite">Load and scan a pass file to begin.</div>
     </div>
   </section>
 
@@ -1332,6 +1357,8 @@ html>body{padding:0}</style>
       const passSimulator = q("est-pass-simulator");
       const passPlayButton = q("est-pass-play");
       const passRestartButton = q("est-pass-restart");
+      const passPaceInput = q("est-pass-pace");
+      const passStepInput = q("est-pass-step");
       const markerNm = 2;
       const fovHalf = 15;
       let phase = 0;
@@ -1586,6 +1613,10 @@ html>body{padding:0}</style>
             renderSelectedPassBlock();
             passPlayButton.disabled = false;
             passRestartButton.disabled = false;
+            passStepInput.disabled = false;
+            passStepInput.max = String(parsedPass.subfields.length);
+            passStepInput.value = "1";
+            q("est-pass-step-val").textContent = `1 of ${parsedPass.subfields.length}`;
             passSimulationPhase = 0;
             updatePassSimulation();
             passWorker.terminate();
@@ -1621,23 +1652,73 @@ html>body{padding:0}</style>
         q("est-pass-completion-context").textContent = "Completed shots inside the fixed FOV";
         passPlayButton.disabled = true;
         passRestartButton.disabled = true;
+        passStepInput.disabled = true;
+        q("est-pass-step-val").textContent = "—";
+        q("est-pass-detail").textContent = message;
         const svg = q("est-pass-fov");
-        const left = 62, top = 24, size = 300;
+        const left = 42, top = 30, size = 286;
         const y0 = top + size / 2;
         let s = `<title>Pass-file simulator preview</title>`;
         s += `<desc>A fixed thirty by thirty micrometer field of view awaiting pass-file shot data.</desc>`;
         s += `<rect class="safe-band" x="${left}" y="${top}" width="${size}" height="${size}"></rect>`;
         s += `<rect class="fov-edge" x="${left}" y="${top}" width="${size}" height="${size}"></rect>`;
-        for (const offset of [0, 50, 100, 150, 200, 250, 300]) {
-          s += `<line class="gridline" x1="${left}" x2="${left + size}" y1="${top + offset}" y2="${top + offset}"></line>`;
-          s += `<line class="gridline" x1="${left + offset}" x2="${left + offset}" y1="${top}" y2="${top + size}"></line>`;
+        for (const tick of [15, 10, 5, 0, -5, -10, -15]) {
+          const yy = top + (15 - tick) / 30 * size;
+          s += `<line class="gridline" x1="${left - 4}" x2="${left + size}" y1="${yy}" y2="${yy}"></line>`;
+          s += `<text class="svg-muted" x="${left - 8}" y="${yy + 4}" text-anchor="end">${tick}</text>`;
         }
         s += `<line class="centerline" x1="${left}" x2="${left + size}" y1="${y0}" y2="${y0}"></line>`;
-        s += `<text class="svg-label" x="${left + size / 2}" y="${y0 - 10}" text-anchor="middle">Beam Y=0 center axis</text>`;
+        s += `<text class="svg-label" x="${left + 7}" y="${y0 - 8}">0% exposed</text>`;
+        s += `<text class="svg-label" x="${left + size + 15}" y="${top + 88}" text-anchor="middle">stage +Y</text>`;
         s += `<text class="svg-muted" x="${left + size / 2}" y="${top + size + 24}" text-anchor="middle">30 × 30 µm fixed E-beam FOV</text>`;
-        s += `<text class="svg-label" x="398" y="92">${message}</text>`;
-        s += `<text class="svg-muted" x="398" y="118">Shot order, dwell, and wafer motion</text>`;
-        s += `<text class="svg-muted" x="398" y="140">will appear here after scanning.</text>`;
+        svg.innerHTML = s;
+        const plot = q("est-pass-plot");
+        let p = `<title>Accumulated subfield position preview</title>`;
+        const pl = 52, pt = 28, pw = 438, ph = 316;
+        const py = y => pt + (16 - y) / 32 * ph;
+        p += `<rect class="safe-band" x="${pl}" y="${py(15)}" width="${pw}" height="${py(-15) - py(15)}"></rect>`;
+        for (const tick of [15, 10, 5, 0, -5, -10, -15]) {
+          p += `<line class="${tick === 0 ? "centerline" : "gridline"}" x1="${pl}" x2="${pl + pw}" y1="${py(tick)}" y2="${py(tick)}"></line>`;
+          p += `<text class="svg-muted" x="${pl - 8}" y="${py(tick) + 4}" text-anchor="end">${tick}</text>`;
+        }
+        p += `<text class="svg-muted" x="14" y="${pt + ph / 2}" transform="rotate(-90 14 ${pt + ph / 2})" text-anchor="middle">Y relative to FOV center (µm)</text>`;
+        p += `<text class="svg-muted" x="${pl + pw / 2}" y="${pt + ph + 44}" text-anchor="middle">Subfield number</text>`;
+        plot.innerHTML = p;
+      }
+      function drawPassPositionPlot() {
+        if (!parsedPass) return;
+        const sections = [];
+        let travel = 0;
+        parsedPass.subfields.forEach(item => {
+          const start = travel;
+          travel += parsedPass.stageSpeedUmSec * item.dwellNs * 1e-9;
+          sections.push({...item, start, end: travel, state: sectionState(start, travel)});
+        });
+        const selected = Math.min(sections.length - 1, Math.max(0, n(passStepInput.value) - 1));
+        const svg = q("est-pass-plot");
+        const left = 52, top = 28, width = 438, height = 316;
+        const minY = -16, maxY = Math.max(18, ...sections.map(d => d.end + 1));
+        const yMap = y => top + (maxY - y) / (maxY - minY) * height;
+        const xMap = i => left + (i + 0.5) / sections.length * width;
+        const barW = Math.max(2, Math.min(24, width / sections.length * 0.64));
+        let s = `<title>Accumulated pass-file subfield position</title>`;
+        s += `<rect class="safe-band" x="${left}" y="${yMap(15)}" width="${width}" height="${yMap(-15) - yMap(15)}"></rect>`;
+        for (const tick of [15, 10, 5, 0, -5, -10, -15]) {
+          s += `<line class="${tick === 0 ? "centerline" : "gridline"}" x1="${left}" x2="${left + width}" y1="${yMap(tick)}" y2="${yMap(tick)}"></line>`;
+          s += `<text class="svg-muted" x="${left - 8}" y="${yMap(tick) + 4}" text-anchor="end">${tick}</text>`;
+        }
+        sections.forEach((d, i) => {
+          const cls = d.state === "safe" ? "sub-safe" : d.state === "partial" ? "sub-partial" : "sub-outside";
+          const x = xMap(i), y = Math.min(yMap(d.start), yMap(d.end));
+          const h = Math.max(3, Math.abs(yMap(d.end) - yMap(d.start)));
+          s += `<rect class="${cls}" x="${x - barW / 2}" y="${y}" width="${barW}" height="${h}" rx="2"></rect>`;
+          if (i === selected) s += `<rect class="selected-ring" x="${x - barW / 2 - 3}" y="${y - 3}" width="${barW + 6}" height="${h + 6}" rx="3"></rect>`;
+          if (sections.length <= 20 || i === 0 || i === sections.length - 1 || (i + 1) % 5 === 0) {
+            s += `<text class="svg-muted" x="${x}" y="${top + height + 22}" text-anchor="middle">${i + 1}</text>`;
+          }
+        });
+        s += `<text class="svg-muted" x="14" y="${top + height / 2}" transform="rotate(-90 14 ${top + height / 2})" text-anchor="middle">Y relative to FOV center (µm)</text>`;
+        s += `<text class="svg-muted" x="${left + width / 2}" y="${top + height + 44}" text-anchor="middle">Subfield number</text>`;
         svg.innerHTML = s;
       }
       function updatePassSimulation() {
@@ -1646,7 +1727,7 @@ html>body{padding:0}</style>
         const visibleCount = Math.max(1, Math.floor(samples.length * passSimulationPhase));
         const current = samples[Math.min(samples.length - 1, visibleCount - 1)];
         const svg = q("est-pass-fov");
-        const left = 62, top = 24, size = 300;
+        const left = 42, top = 30, size = 286;
         const xCenter = (parsedPass.minX + parsedPass.maxX) / 2;
         const mapX = x => left + ((x - xCenter) / 1000 + 15) / 30 * size;
         const waferY = shot => -(shot.y - parsedPass.firstY) / 1000 +
@@ -1657,6 +1738,11 @@ html>body{padding:0}</style>
         s += `<rect class="safe-band" x="${left}" y="${top}" width="${size}" height="${size}"></rect>`;
         s += `<rect class="fov-edge" x="${left}" y="${top}" width="${size}" height="${size}"></rect>`;
         s += `<line class="centerline" x1="${left}" x2="${left + size}" y1="${mapY(0)}" y2="${mapY(0)}"></line>`;
+        for (const tick of [15, 10, 5, 0, -5, -10, -15]) {
+          const yy = mapY(tick);
+          s += `<line class="gridline" x1="${left - 4}" x2="${left + size}" y1="${yy}" y2="${yy}"></line>`;
+          s += `<text class="svg-muted" x="${left - 8}" y="${yy + 4}" text-anchor="end">${tick}</text>`;
+        }
         const start = Math.max(0, visibleCount - 3500);
         for (let i = start; i < visibleCount; i++) {
           const shot = samples[i];
@@ -1666,12 +1752,11 @@ html>body{padding:0}</style>
           if (x < left || x > left + size) continue;
           s += `<circle class="shot-dot" cx="${x}" cy="${mapY(y)}" r="${i === visibleCount - 1 ? 2.4 : 1.1}" opacity="${i === visibleCount - 1 ? 1 : 0.42}"></circle>`;
         }
-        s += `<text class="svg-muted" x="${left + size / 2}" y="${top + size + 24}" text-anchor="middle">30 × 30 µm fixed E-beam FOV</text>`;
-        s += `<text class="svg-label" x="398" y="58">Encoded shot ${(current.index + 1).toLocaleString()}</text>`;
-        s += `<text class="svg-muted" x="398" y="84">X ${(current.x / 1000).toFixed(3)} µm</text>`;
-        s += `<text class="svg-muted" x="398" y="106">Y ${(current.y / 1000).toFixed(3)} µm</text>`;
-        s += `<text class="svg-muted" x="398" y="128">Dwell ${current.dwell} ns</text>`;
+        s += `<text class="svg-label" x="${left + 7}" y="${mapY(0) - 8}">${(passSimulationPhase * 100).toFixed(0)}% exposed</text>`;
+        s += `<text class="svg-label" x="${left + size + 15}" y="${top + 88}" text-anchor="middle">stage +Y</text>`;
+        s += `<text class="svg-muted" x="${left + size / 2}" y="${top + size + 24}" text-anchor="middle">Shot ${(current.index + 1).toLocaleString()} · dwell ${current.dwell} ns</text>`;
         svg.innerHTML = s;
+        drawPassPositionPlot();
         const completion = parsedPass.completedShots / parsedPass.actualShots;
         const fastestSubfield = parsedPass.subfields.reduce(
           (best, item) => !best || item.dwellNs < best.dwellNs ? item : best,
@@ -1692,6 +1777,9 @@ html>body{padding:0}</style>
         q("est-pass-completion").textContent = `${(completion * 100).toFixed(2)}%`;
         q("est-pass-completion-context").textContent =
           `${fmt(parsedPass.completedShots, 0)} of ${fmt(parsedPass.actualShots, 0)} total shots completed`;
+        q("est-pass-detail").textContent =
+          `Shot ${(current.index + 1).toLocaleString()} of ${parsedPass.actualShots.toLocaleString()} · ` +
+          `X ${(current.x / 1000).toFixed(3)} µm · Y ${(current.y / 1000).toFixed(3)} µm · ${current.dwell} ns dwell.`;
       }
       function stopPassSimulation() {
         passSimulationPlaying = false;
@@ -1702,7 +1790,7 @@ html>body{padding:0}</style>
       function animatePassSimulation(timestamp) {
         if (!passSimulationPlaying) return;
         if (!passSimulationLastTime) passSimulationLastTime = timestamp;
-        passSimulationPhase = Math.min(1, passSimulationPhase + (timestamp - passSimulationLastTime) / 12000);
+        passSimulationPhase = Math.min(1, passSimulationPhase + (timestamp - passSimulationLastTime) / 12000 * n(passPaceInput.value));
         passSimulationLastTime = timestamp;
         updatePassSimulation();
         if (passSimulationPhase >= 1) return stopPassSimulation();
@@ -1993,6 +2081,13 @@ html>body{padding:0}</style>
         stopPassSimulation();
         passSimulationPhase = 0;
         updatePassSimulation();
+      });
+      passStepInput.addEventListener("input", () => {
+        if (!parsedPass) return;
+        const value = Math.min(parsedPass.subfields.length, Math.max(1, n(passStepInput.value)));
+        passStepInput.value = String(value);
+        q("est-pass-step-val").textContent = `${value} of ${parsedPass.subfields.length}`;
+        drawPassPositionPlot();
       });
       update(true);
       renderPassSkeleton();
