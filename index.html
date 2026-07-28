@@ -1751,7 +1751,7 @@ html>body{padding:0}</style>
           `<text class="svg-muted" x="168" y="148" text-anchor="middle">1 × 1 µm view · active shot centered</text>`;
         const plot = q("est-pass-plot");
         let p = `<title>Accumulated subfield position preview</title>`;
-        const pl = 52, pt = 28, pw = 438, ph = 316;
+        const pl = 78, pt = 28, pw = 412, ph = 316;
         const py = y => pt + (16 - y) / 32 * ph;
         p += `<rect class="safe-band" x="${pl}" y="${py(15)}" width="${pw}" height="${py(-15) - py(15)}"></rect>`;
         for (const tick of [15, 10, 5, 0, -5, -10, -15]) {
@@ -1779,7 +1779,7 @@ html>body{padding:0}</style>
         const pageStart = Math.floor(selected / 10) * 10;
         const displayedSections = sections.slice(pageStart, pageStart + 10);
         const svg = q("est-pass-plot");
-        const left = 52, top = 28, width = 438, height = 316;
+        const left = 78, top = 28, width = 412, height = 316;
         const minY = 0;
         const maxY = Math.max(1, passLengthUm);
         const yMap = y => top + (maxY - y) / (maxY - minY) * height;
@@ -2097,7 +2097,7 @@ html>body{padding:0}</style>
 
       function drawPlot(m, selectedIndex) {
         const svg = q("est-plot");
-        const left = 52, top = 28, width = 438, height = 316;
+        const left = 78, top = 28, width = 412, height = 316;
         const minY = 0;
         const maxY = Math.max(1, m.length);
         const yMap = y => top + (maxY - y) / (maxY - minY) * height;
