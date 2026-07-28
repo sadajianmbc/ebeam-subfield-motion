@@ -1185,12 +1185,22 @@ html>body{padding:0}</style>
     <div id="est-pass-simulator" hidden>
       <div class="viz-grid metrics">
         <div class="card viz-stat">
-          <div class="text-muted">Constant stage speed</div>
+          <div class="text-muted">Calculated maximum stage speed</div>
+          <div id="est-pass-max-speed" class="viz-stat-value">—</div>
+          <div id="est-pass-max-speed-context" class="text-small text-muted"></div>
+        </div>
+        <div class="card viz-stat">
+          <div class="text-muted">Calculated minimum stage speed</div>
           <div id="est-pass-speed" class="viz-stat-value">—</div>
           <div id="est-pass-speed-context" class="text-small text-muted"></div>
         </div>
         <div class="card viz-stat">
-          <div class="text-muted">Pass completion</div>
+          <div class="text-muted">Shots in pass file</div>
+          <div id="est-pass-shots" class="viz-stat-value">—</div>
+          <div id="est-pass-shots-context" class="text-small text-muted"></div>
+        </div>
+        <div class="card viz-stat">
+          <div class="text-muted">FOV result</div>
           <div id="est-pass-completion" class="viz-stat-value">0%</div>
           <div id="est-pass-completion-context" class="text-small text-muted"></div>
         </div>
@@ -1630,12 +1640,25 @@ html>body{padding:0}</style>
         s += `<text class="svg-muted" x="398" y="128">Dwell ${current.dwell} ns</text>`;
         svg.innerHTML = s;
         const completion = parsedPass.completedShots / parsedPass.actualShots;
+        const fastestSubfield = parsedPass.subfields.reduce(
+          (best, item) => !best || item.dwellNs < best.dwellNs ? item : best,
+          null
+        );
+        const maximumSpeedUmSec = fastestSubfield
+          ? parsedPass.subfieldHeightUm / (fastestSubfield.dwellNs * 1e-9)
+          : 0;
+        q("est-pass-max-speed").textContent = `${fmt(maximumSpeedUmSec / 1000, 6)} mm/s`;
+        q("est-pass-max-speed-context").textContent =
+          `Subfield ${fastestSubfield.index + 1} · ${fmt(fastestSubfield.shotCount, 0)} shots`;
         q("est-pass-speed").textContent = `${fmt(parsedPass.stageSpeedUmSec / 1000, 6)} mm/s`;
         q("est-pass-speed-context").textContent =
-          `Set by subfield ${parsedPass.slowestSubfield.index + 1}, the slowest of ${parsedPass.subfields.length} height sections`;
+          `Used for the entire pass · set by subfield ${parsedPass.slowestSubfield.index + 1}`;
+        q("est-pass-shots").textContent = fmt(parsedPass.actualShots, 0);
+        q("est-pass-shots-context").textContent =
+          `${parsedPass.subfields.length} subfield-height sections analyzed`;
         q("est-pass-completion").textContent = `${(completion * 100).toFixed(2)}%`;
         q("est-pass-completion-context").textContent =
-          `${fmt(parsedPass.completedShots, 0)} of ${fmt(parsedPass.actualShots, 0)} shots remain inside the FOV`;
+          `${fmt(parsedPass.completedShots, 0)} of ${fmt(parsedPass.actualShots, 0)} total shots completed`;
       }
       function stopPassSimulation() {
         passSimulationPlaying = false;
