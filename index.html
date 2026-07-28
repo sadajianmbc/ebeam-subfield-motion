@@ -1377,7 +1377,7 @@ html>body{padding:0}</style>
       const passStepInput = q("est-pass-step");
       const markerNm = 2;
       const fovHalf = 15;
-      const passRunGapNm = 30000;
+      const passRunGapYNm = 9000;
       let phase = 0;
       let playing = false;
       let lastFrameTime = 0;
@@ -1415,7 +1415,7 @@ html>body{padding:0}</style>
         const HEADER_SIZE = 78;
         const RECORD_SIZE = 8;
         const BLOCK_GAP_NM = 9000;
-        const RUN_GAP_NM = 30000;
+        const RUN_GAP_Y_NM = 9000;
         const DENSE_GAP_NM = 60;
         const DENSITY_MARGIN = 0.15;
         const CHUNK_RECORDS = 500000;
@@ -1573,8 +1573,7 @@ html>body{padding:0}</style>
                 const dwell = (low >>> 2) & 0x3FFF;
                 const designY = (y - firstY) * downSign / 1000;
                 const isRunStart = replayPreviousY === null ||
-                  Math.abs(x - replayPreviousX) >= RUN_GAP_NM ||
-                  Math.abs(y - replayPreviousY) >= RUN_GAP_NM;
+                  Math.abs(y - replayPreviousY) > RUN_GAP_Y_NM;
                 if (isRunStart) {
                   stagePositionUm = Math.max(stagePositionUm, -designY);
                 }
@@ -1828,7 +1827,7 @@ html>body{padding:0}</style>
           const dwell = (low >>> 2) & 0x3FFF;
           const designY = (y - parsedPass.firstY) * parsedPass.downSign / 1000;
           const isRunStart = previousY !== null &&
-            (Math.abs(x - previousX) >= passRunGapNm || Math.abs(y - previousY) >= passRunGapNm);
+            Math.abs(y - previousY) > passRunGapYNm;
           if (isRunStart) {
             stagePositionUm = Math.max(stagePositionUm, -designY);
           }
