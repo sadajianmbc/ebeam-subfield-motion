@@ -2044,7 +2044,10 @@ html>body{padding:0}</style>
           const travel = speedUmSec * timeSec;
           const start = stageTravel;
           const end = stageTravel + travel;
-          sections.push({i, actualHeight, shots, timeSec, travel, start, end, state: sectionState(start, end)});
+          sections.push({
+            i, actualHeight, actualShotsAlong: Math.max(1, actualShotsAlong),
+            shots, timeSec, travel, start, end, state: sectionState(start, end)
+          });
           stageTravel += travel;
         }
         return {bss, cd, spaceMult, xWidth, length, height, dwell, pitch, lineCount, centerSpanUm, patternWidthUm, transverse, shotsAlong, fullShots, fullTimeSec, speedUmSec, sections};
@@ -2066,11 +2069,18 @@ html>body{padding:0}</style>
         const yMap = y => y0 + (fovHalf - y) / (2 * fovHalf) * size;
         const xMap = x => x0 + (x + fovHalf) / (2 * fovHalf) * size;
         const linesToDraw = Math.min(m.lineCount, 72);
+        const maxVisibleDots = 6000;
+        const dotsAlong = Math.max(1, Math.min(
+          selected.actualShotsAlong,
+          Math.floor(maxVisibleDots / linesToDraw)
+        ));
+        const shotRadius = Math.max(0.68, Math.min(1.15, size / Math.max(250, dotsAlong * 5)));
         const stageShift = selected.start + selected.travel * progress;
         const lineTop = stageShift;
         const lineBottom = lineTop - selected.actualHeight;
         let s = `<title>Subfield ${selected.i + 1} in the moving field of view</title>`;
-        s += `<desc>The field spans plus or minus 15 micrometers. Every vertical line begins on the beam center axis at zero, then the complete design moves upward continuously with positive Y stage travel while the beam exposes one line at a time from top to bottom and left to right.</desc>`;
+        s += `<desc>The field spans plus or minus 15 micrometers. Gray dots are pending shots. Each dot turns blue when the beam reaches it, exposing from top to bottom along each line and then from left to right while the complete design moves upward with positive Y stage travel.</desc>`;
+        s += `<defs><clipPath id="est-manual-fov-clip"><rect x="${x0}" y="${y0}" width="${size}" height="${size}"></rect></clipPath></defs>`;
         s += `<rect class="safe-band" x="${x0}" y="${y0}" width="${size}" height="${size}"></rect>`;
         s += `<rect class="fov-edge" x="${x0}" y="${y0}" width="${size}" height="${size}"></rect>`;
         s += `<line class="centerline" x1="${x0}" x2="${x0 + size}" y1="${yMap(0)}" y2="${yMap(0)}"></line>`;
@@ -2079,20 +2089,27 @@ html>body{padding:0}</style>
           s += `<line class="gridline" x1="${x0 - 4}" x2="${x0 + size}" y1="${yy}" y2="${yy}"></line>`;
           s += `<text class="svg-muted" x="${x0 - 8}" y="${yy + 4}" text-anchor="end">${tick}</text>`;
         }
+        s += `<g clip-path="url(#est-manual-fov-clip)">`;
         for (let i = 0; i < linesToDraw; i++) {
           const sourceIndex = linesToDraw === 1 ? 0 : i * (m.lineCount - 1) / (linesToDraw - 1);
           const firstCenter = -m.patternWidthUm / 2 + m.cd / 2000;
           const x = firstCenter + sourceIndex * m.pitch / 1000;
-          const lineProgress = Math.max(0, Math.min(1, progress * linesToDraw - i));
-          const exposedTo = lineTop + (lineBottom - lineTop) * lineProgress;
-          s += `<line class="line-mark" x1="${xMap(x)}" x2="${xMap(x)}" y1="${yMap(lineTop)}" y2="${yMap(lineBottom)}"></line>`;
-          if (lineProgress > 0) s += `<line class="active-mark" x1="${xMap(x)}" x2="${xMap(x)}" y1="${yMap(lineTop)}" y2="${yMap(exposedTo)}"></line>`;
+          for (let shotIndex = 0; shotIndex < dotsAlong; shotIndex++) {
+            const alongFraction = dotsAlong === 1 ? 1 : shotIndex / (dotsAlong - 1);
+            const shotY = lineTop + (lineBottom - lineTop) * alongFraction;
+            if (shotY < -fovHalf || shotY > fovHalf) continue;
+            const exposureFraction = (sourceIndex + (shotIndex + 1) / dotsAlong) / m.lineCount;
+            const shotClass = progress >= exposureFraction ? "shot-dot" : "shot-pending";
+            s += `<circle class="${shotClass}" cx="${xMap(x)}" cy="${yMap(shotY)}" r="${shotRadius}"></circle>`;
+          }
         }
+        s += `</g>`;
         s += `<text class="svg-label" x="${x0 + 7}" y="${yMap(Math.min(15, lineTop)) - 7}">${(progress * 100).toFixed(0)}% exposed</text>`;
         s += `<line class="stage-arrow" x1="${x0 + size + 15}" x2="${x0 + size + 15}" y1="${yMap(-4)}" y2="${yMap(5)}"></line>`;
         s += `<path class="stage-arrow" d="M ${x0 + size + 10} ${yMap(4)} L ${x0 + size + 15} ${yMap(5)} L ${x0 + size + 20} ${yMap(4)} Z"></path>`;
         s += `<text class="svg-label" x="${x0 + size + 15}" y="${yMap(6.5)}" text-anchor="middle">stage +Y</text>`;
         s += `<text class="svg-muted" x="${x0 + size / 2}" y="${y0 + size + 23}" text-anchor="middle">Generated X width ${fmt(m.patternWidthUm, 3)} µm · ${m.lineCount} lines</text>`;
+        s += `<text class="svg-muted" x="${x0 + size / 2}" y="${y0 + size + 42}" text-anchor="middle">Gray pending shots · blue exposed shots</text>`;
         svg.innerHTML = s;
       }
 
