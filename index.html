@@ -1177,6 +1177,13 @@ html>body{padding:0}</style>
         Matching metadata
         <input id="est-pass-meta" class="form-control" type="file" accept=".meta,.pass.meta,application/octet-stream">
       </label>
+      <label class="form-label">
+        Stage speed used for simulation
+        <select id="est-pass-speed-source" class="form-select">
+          <option value="cats">CATS stored speed</option>
+          <option value="calculated">Calculated speed</option>
+        </select>
+      </label>
     </div>
     <div class="viz-row pass-actions">
       <button id="est-pass-scan" type="button" class="btn btn-primary" disabled>Scan pass file</button>
@@ -1193,12 +1200,12 @@ html>body{padding:0}</style>
     <div id="est-pass-simulator">
       <div class="viz-grid metrics">
         <div class="card viz-stat">
-          <div class="text-muted">Calculated maximum stage speed</div>
+          <div class="text-muted">Calculated stage speed</div>
           <div id="est-pass-max-speed" class="viz-stat-value">—</div>
           <div id="est-pass-max-speed-context" class="text-small text-muted"></div>
         </div>
         <div class="card viz-stat">
-          <div class="text-muted">Calculated minimum stage speed</div>
+          <div id="est-pass-cats-speed-label" class="text-muted">CATS stage speed</div>
           <div id="est-pass-speed" class="viz-stat-value">—</div>
           <div id="est-pass-speed-context" class="text-small text-muted"></div>
         </div>
@@ -1365,6 +1372,7 @@ html>body{padding:0}</style>
       const passResult = q("est-pass-result");
       const passBlockSelect = q("est-pass-block");
       const passBlockDetail = q("est-pass-block-detail");
+      const passSpeedSourceInput = q("est-pass-speed-source");
       const passSimulator = q("est-pass-simulator");
       const passPlayButton = q("est-pass-play");
       const passRestartButton = q("est-pass-restart");
@@ -1419,7 +1427,7 @@ html>body{padding:0}</style>
         const FPGA_COORD_TICK_NM = 0.14;
 
         self.onmessage = async event => {
-          const {passFile, metaFile, subfieldHeightUm} = event.data;
+          const {passFile, metaFile, subfieldHeightUm, speedSource} = event.data;
           try {
             const headerSource = metaFile || passFile;
             const headerBuffer = await headerSource.slice(0, HEADER_SIZE).arrayBuffer();
@@ -1428,8 +1436,10 @@ html>body{padding:0}</style>
             const magic = header.getUint32(0, true);
             const version = header.getUint16(4, true);
             const expectedShotsBig = header.getBigUint64(48, true);
+            const catsStageSpeedMmSec = header.getFloat64(36, true);
             if (magic !== MAGIC) throw new Error("This is not a recognized pass file.");
             if (version !== 1 && version !== 2) throw new Error(`Only V1 and V2 pass records are currently supported (found V${version}).`);
+            if (!Number.isFinite(catsStageSpeedMmSec) || catsStageSpeedMmSec <= 0) throw new Error("The CATS stage speed in the pass header is missing or invalid.");
             if (expectedShotsBig > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error("The shot count is too large for browser processing.");
 
             const dataOffset = metaFile ? 0 : HEADER_SIZE;
@@ -1584,7 +1594,9 @@ html>body{padding:0}</style>
             const fallbackMaximum = fastest ? fallbackSpacingNm / fastest.dwellNs * 1e6 : 0;
             const minimumStageSpeedUmSec = rowSpeedsUmSec.length ? rowSpeedsUmSec.reduce((a, b) => Math.min(a, b)) : fallbackMinimum;
             const maximumStageSpeedUmSec = rowSpeedsUmSec.length ? rowSpeedsUmSec.reduce((a, b) => Math.max(a, b)) : fallbackMaximum;
-            const stageSpeedUmSec = minimumStageSpeedUmSec;
+            const calculatedStageSpeedUmSec = minimumStageSpeedUmSec;
+            const catsStageSpeedUmSec = catsStageSpeedMmSec * 1000;
+            const stageSpeedUmSec = speedSource === "calculated" ? calculatedStageSpeedUmSec : catsStageSpeedUmSec;
             const reorderedRecords = new ArrayBuffer(actualShots * RECORD_SIZE);
             const reorderedView = new DataView(reorderedRecords);
             let reorderedSourceShots = 0;
@@ -1664,7 +1676,8 @@ html>body{padding:0}</style>
               result: {
                 version, expectedShots, actualShots, dataOffset, fileSize: passFile.size,
                 hasSidecar: Boolean(metaFile), blocks, subfields, slowestSubfield: slowest, fastestSubfield: fastest,
-                stageSpeedUmSec, minimumStageSpeedUmSec, maximumStageSpeedUmSec,
+                stageSpeedUmSec, calculatedStageSpeedUmSec, catsStageSpeedUmSec, catsStageSpeedMmSec,
+                speedSource, minimumStageSpeedUmSec, maximumStageSpeedUmSec,
                 totalDwellNs: cumulativeDwellNs, firstY, downSign,
                 minX: minXAll, maxX: maxXAll, minY: minYAll, maxY: maxYAll,
                 sampleStride, shotSamples, subfieldHeightUm, completedShots,
@@ -1694,6 +1707,9 @@ html>body{padding:0}</style>
       }
       function updatePassFileState() {
         const {passFile, metaFile} = selectedPassPair();
+        passSpeedSourceInput.options[0].textContent = metaFile
+          ? "CATS 1 speed (from meta)"
+          : "CATS 1.5 speed (from pass)";
         passScanButton.disabled = !passFile;
         passResult.hidden = true;
         parsedPass = null;
@@ -1742,7 +1758,8 @@ html>body{padding:0}</style>
             passProgress.hidden = true;
             passScanButton.disabled = false;
             passStatus.textContent =
-              `Pass format V${parsedPass.version} · ${fmt(parsedPass.actualShots, 0)} shots · ${parsedPass.fovSections.length} FOV sections · ${fmtBytes(parsedPass.fileSize)} · ${parsedPass.hasSidecar ? "sidecar header" : "inline header"}`;
+              `Pass format V${parsedPass.version} · ${fmt(parsedPass.actualShots, 0)} shots · ${parsedPass.fovSections.length} FOV sections · ${fmtBytes(parsedPass.fileSize)} · ` +
+              `${parsedPass.hasSidecar ? "sidecar header" : "inline header"} · using ${parsedPass.speedSource === "cats" ? "CATS stored" : "calculated"} stage speed`;
             passBlockSelect.innerHTML = "";
             parsedPass.fovSections.forEach((section, index) => {
               const option = document.createElement("option");
@@ -1779,13 +1796,18 @@ html>body{padding:0}</style>
           passWorker = null;
         };
         passStatus.className = "text-small text-muted";
-        passWorker.postMessage({passFile, metaFile, subfieldHeightUm: 30});
+        passWorker.postMessage({
+          passFile,
+          metaFile,
+          subfieldHeightUm: 30,
+          speedSource: passSpeedSourceInput.value
+        });
       }
       function renderPassSkeleton(message = "Load and scan a pass file to populate the simulation") {
         q("est-pass-max-speed").textContent = "—";
-        q("est-pass-max-speed-context").textContent = "FPGA-quantized from the fastest Y row";
+        q("est-pass-max-speed-context").textContent = "FPGA-quantized from the encoded shot rows";
         q("est-pass-speed").textContent = "—";
-        q("est-pass-speed-context").textContent = "FPGA-quantized constant speed used for the pass";
+        q("est-pass-speed-context").textContent = "Read from the pass or matching metadata header";
         q("est-pass-shots").textContent = "—";
         q("est-pass-shots-context").textContent = "Read from the complete pass file";
         q("est-pass-completion").textContent = "—";
@@ -2016,12 +2038,16 @@ html>body{padding:0}</style>
         drawPassPositionPlot();
         const completion = parsedPass.completedShots / parsedPass.actualShots;
         const missedFraction = parsedPass.missedShots / parsedPass.actualShots;
-        q("est-pass-max-speed").textContent = `${fmt(parsedPass.maximumStageSpeedUmSec / 1000, 6)} mm/s`;
+        const catsSourceLabel = parsedPass.hasSidecar ? "CATS 1 stage speed (from meta)" : "CATS 1.5 stage speed (from pass)";
+        q("est-pass-cats-speed-label").textContent = catsSourceLabel;
+        q("est-pass-max-speed").textContent = `${fmt(parsedPass.calculatedStageSpeedUmSec / 1000, 6)} mm/s`;
         q("est-pass-max-speed-context").textContent =
-          `FPGA steps: ${parsedPass.fpgaDwellTickNs} ns dwell · ${parsedPass.fpgaCoordTickNm} nm position`;
-        q("est-pass-speed").textContent = `${fmt(parsedPass.minimumStageSpeedUmSec / 1000, 6)} mm/s`;
+          `FPGA steps: ${parsedPass.fpgaDwellTickNs} ns dwell · ${parsedPass.fpgaCoordTickNm} nm position` +
+          (parsedPass.speedSource === "calculated" ? " · selected" : "");
+        q("est-pass-speed").textContent = `${fmt(parsedPass.catsStageSpeedMmSec, 6)} mm/s`;
         q("est-pass-speed-context").textContent =
-          `Used continuously · ${fmt(parsedPass.fpgaRowSpacingNm, 2)} nm Y step · ${fmt(parsedPass.typicalShotsPerRow || 0, 0)} shots/row`;
+          `${parsedPass.hasSidecar ? "Metadata header" : "Inline pass header"}` +
+          (parsedPass.speedSource === "cats" ? " · selected" : "");
         q("est-pass-shots").textContent = fmt(parsedPass.actualShots, 0);
         q("est-pass-shots-context").textContent =
           `${parsedPass.subfields.length} fixed 30 µm pass sections analyzed`;
@@ -2415,6 +2441,9 @@ html>body{padding:0}</style>
       passModeButton.addEventListener("click", () => setSimulatorMode("pass"));
       passFileInput.addEventListener("change", updatePassFileState);
       passMetaInput.addEventListener("change", updatePassFileState);
+      passSpeedSourceInput.addEventListener("change", () => {
+        if (selectedPassPair().passFile) scanPassFile();
+      });
       passScanButton.addEventListener("click", scanPassFile);
       passBlockSelect.addEventListener("change", () => {
         renderSelectedPassBlock();
